@@ -708,6 +708,7 @@ class _StoreHomeScreenState extends State<StoreHomeScreen> {
 
   @override
   void initState() {
+    // Carga el catálogo y los datos persistidos al abrir la tienda.
     super.initState();
     _loadPersistedData();
   }
@@ -1115,20 +1116,47 @@ class ProductList extends StatelessWidget {
       context: context,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => AlertDialog(
-          title: Text('Reservar ${product.name}'),
-          content: TextFormField(
-            initialValue: quantityText,
-            keyboardType: TextInputType.number,
-            onChanged: (value) {
-              quantityText = value;
-              if (errorText != null) {
-                setDialogState(() => errorText = null);
-              }
-            },
-            decoration: InputDecoration(
-              labelText: 'Cantidad (máximo ${product.stock})',
-              errorText: errorText,
-            ),
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('Reservar ${product.name}'),
+              if (errorText != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  errorText!,
+                  style: TextStyle(
+                    color: Theme.of(context).colorScheme.error,
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              TextFormField(
+                initialValue: quantityText,
+                keyboardType: TextInputType.number,
+                onChanged: (value) {
+                  quantityText = value;
+                  if (errorText != null) {
+                    setDialogState(() => errorText = null);
+                  }
+                },
+                decoration: InputDecoration(
+                  labelText: 'Cantidad (máximo ${product.stock})',
+                ),
+              ),
+              if (errorText != null) ...[
+                const SizedBox(height: 8),
+                Text(
+                  errorText!,
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ],
+            ],
           ),
           actions: [
             TextButton(
@@ -1384,6 +1412,7 @@ class _ProductManagerScreenState extends State<ProductManagerScreen> {
 
   @override
   void initState() {
+    // Copia los productos recibidos para editarlos sin mutar la pantalla anterior.
     super.initState();
     // Se evita modificar directamente la lista que recibió la pantalla.
     _products = List<Product>.from(widget.products);
@@ -1536,6 +1565,7 @@ class _OfferManagerScreenState extends State<OfferManagerScreen> {
 
   @override
   void initState() {
+    // Copia las ofertas actuales para confirmar los cambios al regresar.
     super.initState();
     _products = List<Product>.from(widget.products);
   }
@@ -1665,6 +1695,7 @@ class _CategoryManagerScreenState extends State<CategoryManagerScreen> {
 
   @override
   void initState() {
+    // Inicializa las categorías que se administrarán en esta pantalla.
     super.initState();
     _categories = List<String>.from(widget.categories);
   }
@@ -1833,6 +1864,7 @@ class _ProductEditorScreenState extends State<ProductEditorScreen> {
 
   @override
   void initState() {
+    // Carga los datos existentes del producto en los campos del formulario.
     super.initState();
     // Al editar se cargan los datos existentes; al crear se dejan vacíos.
     final product = widget.product;
@@ -2062,6 +2094,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
 
   @override
   void initState() {
+    // Copia las reservas para permitir cambiar sus estados localmente.
     super.initState();
     _orders = List<Order>.from(widget.orders);
   }
@@ -2493,6 +2526,7 @@ class _CustomerManagerScreenState extends State<CustomerManagerScreen> {
 
   @override
   void initState() {
+    // Escucha el texto de búsqueda para actualizar la lista de clientes.
     super.initState();
     _customers = List<Customer>.from(widget.customers);
     _cedulaSearchController.addListener(_refreshResults);
@@ -2703,6 +2737,7 @@ class _CustomerEditorScreenState extends State<CustomerEditorScreen> {
 
   @override
   void initState() {
+    // Inicializa los campos con los datos del cliente que se está editando.
     super.initState();
     final customer = widget.customer;
     _cedulaController = TextEditingController(text: customer?.cedula);

@@ -70,6 +70,24 @@ void main() {
     );
   });
 
+  testWidgets('informa el stock cuando la reserva supera el inventario', (
+    WidgetTester tester,
+  ) async {
+    await _pumpStoreAfterLogin(tester);
+
+    await tester.tap(find.byTooltip('Reservar artículo').first);
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextFormField), '9');
+    await tester.tap(find.widgetWithText(FilledButton, 'Reservar'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('No hay stock suficiente. Disponible: 8'),
+      findsNWidgets(2),
+    );
+    expect(find.text('Reservar Refrigeradora Inox 300 L'), findsOneWidget);
+  });
+
   testWidgets('el cliente solo puede reservar ofertas con stock', (
     WidgetTester tester,
   ) async {
