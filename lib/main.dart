@@ -15,9 +15,11 @@ import 'firebase_options.dart';
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   try {
+    // Firebase se inicializa antes de montar la interfaz para habilitar Firestore.
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
+    // La sesión anónima identifica la instalación para las reglas de Firestore.
     if (FirebaseAuth.instance.currentUser == null) {
       await FirebaseAuth.instance.signInAnonymously();
     }
@@ -51,6 +53,7 @@ class FirebaseStoreRepository {
   // Convierte un texto en un identificador seguro para un documento Firestore.
   static String _key(String value) => value.replaceAll('/', '_');
 
+  // Ejecuta una escritura y conserva el funcionamiento local si Firebase falla.
   static Future<void> _runWrite(
     String operation,
     Future<void> Function() write,
@@ -62,6 +65,7 @@ class FirebaseStoreRepository {
     }
   }
 
+  // Ejecuta una lectura y devuelve null cuando Firestore no está disponible.
   static Future<T?> _runRead<T>(
     String operation,
     Future<T> Function() read,
@@ -160,6 +164,7 @@ class FirebaseStoreRepository {
     });
   }
 
+  // Guarda los clientes iniciales en una sola operación de Firestore.
   static Future<void> saveCustomers(List<Customer> customers) async {
     if (!isAvailable || customers.isEmpty) return;
     await _runWrite('guardar clientes iniciales', () async {
@@ -181,6 +186,7 @@ class FirebaseStoreRepository {
     });
   }
 
+  // Reemplaza los clientes almacenados durante la migración de credenciales.
   static Future<void> replaceCustomers(List<Customer> customers) async {
     if (!isAvailable) return;
     await _runWrite('actualizar todos los clientes', () async {
@@ -225,6 +231,7 @@ class FirebaseStoreRepository {
     });
   }
 
+  // Descuenta stock y crea la reserva en una transacción atómica.
   static Future<String?> saveReservation(Product product, Order order) async {
     if (!isAvailable) return null;
     final productReference = _collection('products').doc(_key(product.name));
@@ -443,6 +450,7 @@ class Customer {
   final String email;
   final String password;
 
+  // Conserva los datos del cliente y permite actualizar sus credenciales.
   Customer copyWith({String? email, String? password}) => Customer(
     cedula: cedula,
     name: name,
@@ -554,6 +562,7 @@ final defaultCustomers = <Customer>[
   ),
 ];
 
+// Genera el correo estándar solicitado para un cliente migrado.
 String _customerEmailFromName(String name) {
   final firstName = name.trim().split(RegExp(r'\s+')).first.toLowerCase();
   final normalizedName = firstName
@@ -567,6 +576,7 @@ String _customerEmailFromName(String name) {
 }
 
 const products = [
+// Convierte el estado de una reserva en texto visible para las pantallas.
   // Catálogo inicial que se copia al estado de StoreHomeScreen.
   Product(
     name: 'Refrigeradora Inox 300 L',
@@ -896,8 +906,16 @@ class _StoreHomeScreenState extends State<StoreHomeScreen> {
     if (productIndex < 0 ||
         quantity <= 0 ||
         quantity > _products[productIndex].stock) {
+      final availableStock = productIndex < 0
+          ? 0
+          : _products[productIndex].stock;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('La cantidad supera el stock disponible')),
+        SnackBar(
+          content: Text(
+            'No hay stock suficiente. Disponible para reservar: '
+            '$availableStock',
+          ),
+        ),
       );
       return;
     }
@@ -1092,33 +1110,51 @@ class ProductList extends StatelessWidget {
   // Pide una cantidad válida antes de enviar la solicitud de compra.
   Future<void> _askQuantity(BuildContext context, Product product) async {
     var quantityText = '1';
+    String? errorText;
     final quantity = await showDialog<int>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Reservar ${product.name}'),
-        content: TextFormField(
-          initialValue: quantityText,
-          keyboardType: TextInputType.number,
-          onChanged: (value) => quantityText = value,
-          decoration: InputDecoration(
-            labelText: 'Cantidad (máximo ${product.stock})',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Cancelar'),
-          ),
-          FilledButton(
-            onPressed: () {
-              final value = int.tryParse(quantityText) ?? 0;
-              if (value > 0 && value <= product.stock) {
-                Navigator.pop(context, value);
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text('Reservar ${product.name}'),
+          content: TextFormField(
+            initialValue: quantityText,
+            keyboardType: TextInputType.number,
+            onChanged: (value) {
+              quantityText = value;
+              if (errorText != null) {
+                setDialogState(() => errorText = null);
               }
             },
-            child: const Text('Reservar'),
+            decoration: InputDecoration(
+              labelText: 'Cantidad (máximo ${product.stock})',
+              errorText: errorText,
+            ),
           ),
-        ],
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancelar'),
+            ),
+            FilledButton(
+              onPressed: () {
+                final value = int.tryParse(quantityText) ?? 0;
+                if (value <= 0) {
+                  setDialogState(
+                    () => errorText = 'Ingresa una cantidad válida',
+                  );
+                } else if (value > product.stock) {
+                  setDialogState(
+                    () => errorText =
+                        'No hay stock suficiente. Disponible: ${product.stock}',
+                  );
+                } else {
+                  Navigator.pop(context, value);
+                }
+              },
+              child: const Text('Reservar'),
+            ),
+          ],
+        ),
       ),
     );
     if (quantity != null) onOrder?.call(product, quantity);
