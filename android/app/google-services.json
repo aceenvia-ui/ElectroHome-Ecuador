@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "729455727817",
+    "project_id": "electrohome-ecuador",
+    "storage_bucket": "electrohome-ecuador.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:729455727817:android:af954357dff98f3f91a918",
+        "android_client_info": {
+          "package_name": "com.example.flutter_application_1"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyApdBCX4AA4DtMXL21DMqKyR-ci8oNwlqM"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

@@ -1,14 +1,225 @@
 import 'dart:io';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
+import 'firebase_options.dart';
+
+// La aplicación es una tienda local conectada a Firestore.
+// Las pantallas modifican el estado de la tienda y el repositorio sincroniza
+// esos cambios con las colecciones de Firebase cuando hay conexión configurada.
 // Punto de entrada: Flutter ejecuta main y monta la aplicación completa.
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+  } catch (_) {
+    // La app conserva el funcionamiento local hasta agregar la configuración Firebase.
+  }
   runApp(const MyApp());
 }
 
+// Centraliza todas las lecturas y escrituras de la aplicación en Firestore.
+// Mantener estas operaciones aquí evita mezclar consultas de base de datos con
+// el código visual de las pantallas.
+class FirebaseStoreRepository {
+  // Constructor privado: esta clase solo expone métodos estáticos.
+  FirebaseStoreRepository._();
+
+  // Referencia única a la base de datos Firestore.
+  static final _database = FirebaseFirestore.instance;
+
+  // Indica si Firebase se inicializó correctamente.
+  static bool get isAvailable => Firebase.apps.isNotEmpty;
+
+  // Devuelve una colección Firestore tipada como mapa de datos.
+  static CollectionReference<Map<String, dynamic>> _collection(String name) =>
+      _database.collection(name);
+
+  // Convierte un texto en un identificador seguro para un documento Firestore.
+  static String _key(String value) => value.replaceAll('/', '_');
+
+  // Lee todos los productos y transforma cada documento en un objeto Product.
+  static Future<List<Product>> loadProducts() async {
+    if (!isAvailable) return [];
+    final snapshot = await _collection('products').get();
+    return snapshot.docs.map((document) {
+      final data = document.data();
+      return Product(
+        name: data['name'] as String? ?? document.id,
+        type: data['type'] as String? ?? '',
+        category: data['category'] as String? ?? '',
+        price: data['price'] as String? ?? '',
+        icon: Icons.devices_other,
+        description: data['description'] as String? ?? '',
+        stock: (data['stock'] as num?)?.toInt() ?? 0,
+        imageUrl: data['imageUrl'] as String? ?? '',
+        imagePath: data['imagePath'] as String? ?? '',
+        offerEnabled: data['offerEnabled'] as bool? ?? false,
+        offerPrice: data['offerPrice'] as String? ?? '',
+      );
+    }).toList();
+  }
+
+  // Guarda el catálogo completo en una operación por lotes.
+  static Future<void> saveProducts(List<Product> products) async {
+    if (!isAvailable) return;
+    final batch = _database.batch();
+    for (final product in products) {
+      final reference = _collection('products').doc(_key(product.name));
+      batch.set(reference, {
+        'name': product.name,
+        'type': product.type,
+        'category': product.category,
+        'price': product.price,
+        'description': product.description,
+        'stock': product.stock,
+        'imageUrl': product.imageUrl,
+        'imagePath': product.imagePath,
+        'offerEnabled': product.offerEnabled,
+        'offerPrice': product.offerPrice,
+      });
+    }
+    await batch.commit();
+  }
+
+  // Persiste las categorías disponibles para la administración.
+  static Future<void> saveCategories(List<String> categories) async {
+    if (!isAvailable) return;
+    final batch = _database.batch();
+    for (final category in categories) {
+      batch.set(_collection('categories').doc(_key(category)), {
+        'name': category,
+      });
+    }
+    await batch.commit();
+  }
+
+  // Recupera las categorías almacenadas en Firestore.
+  static Future<List<String>> loadCategories() async {
+    if (!isAvailable) return [];
+    final snapshot = await _collection('categories').get();
+    return snapshot.docs
+        .map((document) => document.data()['name'] as String? ?? document.id)
+        .toList();
+  }
+
+  // Crea o actualiza un cliente usando su correo como identificador.
+  static Future<void> saveCustomer(Customer customer) async {
+    if (!isAvailable) return;
+    await _collection('customers').doc(_key(customer.email)).set({
+      'cedula': customer.cedula,
+      'name': customer.name,
+      'address': customer.address,
+      'phone': customer.phone,
+      'city': customer.city,
+      'email': customer.email,
+      'password': customer.password,
+      'registeredAt': customer.registeredAt.toIso8601String(),
+    });
+  }
+
+  // Registra un nuevo pedido con estado inicial solicitado.
+  static Future<void> saveOrder(Order order) async {
+    if (!isAvailable) return;
+    await _collection('orders').add({
+      'customerEmail': order.customerEmail,
+      'productName': order.productName,
+      'quantity': order.quantity,
+      'createdAt': order.createdAt.toIso8601String(),
+      'status': order.status.name,
+    });
+  }
+
+  // Actualiza únicamente el estado de un pedido existente.
+  static Future<void> updateOrder(String orderId, Order order) async {
+    if (!isAvailable) return;
+    await _collection('orders')
+        .doc(orderId)
+        .update({'status': order.status.name});
+  }
+
+  // Guarda las respuestas de la encuesta para consultarlas como administrador.
+  static Future<void> saveSurvey(SurveyResponse survey) async {
+    if (!isAvailable) return;
+    await _collection('surveys').add({
+      'name': survey.name,
+      'email': survey.email,
+      'satisfaction': survey.satisfaction,
+      'service': survey.service,
+      'comments': survey.comments,
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  // Recupera los clientes registrados.
+  static Future<List<Customer>> loadCustomers() async {
+    if (!isAvailable) return [];
+    final snapshot = await _collection('customers').get();
+    return snapshot.docs.map((document) {
+      final data = document.data();
+      return Customer(
+        cedula: data['cedula'] as String? ?? '',
+        name: data['name'] as String? ?? '',
+        address: data['address'] as String? ?? '',
+        phone: data['phone'] as String? ?? '',
+        city: data['city'] as String? ?? '',
+        email: data['email'] as String? ?? '',
+        password: data['password'] as String? ?? '',
+        registeredAt:
+            DateTime.tryParse(data['registeredAt'] as String? ?? '') ??
+            DateTime.now(),
+      );
+    }).toList();
+  }
+
+  // Recupera pedidos y convierte el texto de estado al enum de Dart.
+  static Future<List<Order>> loadOrders() async {
+    if (!isAvailable) return [];
+    final snapshot = await _collection('orders').get();
+    return snapshot.docs.map((document) {
+      final data = document.data();
+      final statusName =
+          data['status'] as String? ?? OrderStatus.solicitado.name;
+      return Order(
+        id: document.id,
+        customerEmail: data['customerEmail'] as String? ?? '',
+        productName: data['productName'] as String? ?? '',
+        quantity: (data['quantity'] as num?)?.toInt() ?? 0,
+        createdAt:
+            DateTime.tryParse(data['createdAt'] as String? ?? '') ??
+            DateTime.now(),
+        status: OrderStatus.values.firstWhere(
+          (status) => status.name == statusName,
+          orElse: () => OrderStatus.solicitado,
+        ),
+      );
+    }).toList();
+  }
+
+  // Recupera las encuestas recibidas.
+  static Future<List<SurveyResponse>> loadSurveys() async {
+    if (!isAvailable) return [];
+    final snapshot = await _collection('surveys').get();
+    return snapshot.docs.map((document) {
+      final data = document.data();
+      return SurveyResponse(
+        name: data['name'] as String? ?? '',
+        email: data['email'] as String? ?? '',
+        satisfaction: data['satisfaction'] as String? ?? '',
+        service: data['service'] as String? ?? '',
+        comments: data['comments'] as String? ?? '',
+      );
+    }).toList();
+  }
+}
+
 // Configuración global de la aplicación: tema, título y pantalla inicial.
+// Widget raíz: configura el tema, el título y la primera pantalla.
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
@@ -21,6 +232,7 @@ class MyApp extends StatelessWidget {
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
         useMaterial3: true,
+        splashFactory: NoSplash.splashFactory,
       ),
       home: const StoreHomeScreen(),
     );
@@ -28,6 +240,7 @@ class MyApp extends StatelessWidget {
 }
 
 // Modelo inmutable que contiene toda la información visible de un producto.
+// Representa un producto del catálogo y su inventario disponible.
 class Product {
   const Product({
     required this.name,
@@ -36,6 +249,7 @@ class Product {
     required this.price,
     required this.icon,
     required this.description,
+    this.stock = 0,
     this.imageUrl = '',
     this.imagePath = '',
     this.offerEnabled = false,
@@ -48,6 +262,7 @@ class Product {
   final String price;
   final IconData icon;
   final String description;
+  final int stock;
   final String imageUrl;
   final String imagePath;
   // Indica si el producto aparece dentro de la pestaña Ofertas.
@@ -56,7 +271,7 @@ class Product {
   final String offerPrice;
 
   // Permite cambiar únicamente los datos de la oferta sin perder el resto.
-  Product copyWith({bool? offerEnabled, String? offerPrice}) {
+  Product copyWith({bool? offerEnabled, String? offerPrice, int? stock}) {
     return Product(
       name: name,
       type: type,
@@ -64,6 +279,7 @@ class Product {
       price: price,
       icon: icon,
       description: description,
+      stock: stock ?? this.stock,
       imageUrl: imageUrl,
       imagePath: imagePath,
       offerEnabled: offerEnabled ?? this.offerEnabled,
@@ -71,6 +287,100 @@ class Product {
     );
   }
 }
+
+// Representa una cuenta de cliente y sus datos de contacto.
+class Customer {
+  const Customer({
+    required this.cedula,
+    required this.name,
+    required this.address,
+    required this.phone,
+    required this.city,
+    required this.registeredAt,
+    required this.email,
+    required this.password,
+  });
+
+  final String cedula;
+  final String name;
+  final String address;
+  final String phone;
+  final String city;
+  final DateTime registeredAt;
+  final String email;
+  final String password;
+}
+
+// Estados posibles de un pedido dentro del flujo de venta.
+enum OrderStatus { solicitado, despachado, ventaRealizada }
+
+// Representa una solicitud de compra hecha por un cliente.
+class Order {
+  const Order({
+    required this.customerEmail,
+    required this.productName,
+    required this.quantity,
+    required this.createdAt,
+    this.status = OrderStatus.solicitado,
+    this.id,
+  });
+
+  final String customerEmail;
+  final String productName;
+  final int quantity;
+  final DateTime createdAt;
+  final OrderStatus status;
+  final String? id;
+
+  Order copyWith({OrderStatus? status}) => Order(
+    customerEmail: customerEmail,
+    productName: productName,
+    quantity: quantity,
+    createdAt: createdAt,
+    status: status ?? this.status,
+    id: id,
+  );
+}
+
+// Contiene las respuestas enviadas desde la encuesta de satisfacción.
+class SurveyResponse {
+  const SurveyResponse({
+    required this.name,
+    required this.email,
+    required this.satisfaction,
+    required this.service,
+    required this.comments,
+  });
+
+  final String name;
+  final String email;
+  final String satisfaction;
+  final String service;
+  final String comments;
+}
+
+final defaultCustomers = <Customer>[
+  Customer(
+    cedula: '0102030405',
+    name: 'María González',
+    address: 'Av. 12 de Abril y Loja',
+    phone: '0991234567',
+    city: 'Cuenca',
+    registeredAt: DateTime(2026, 1, 15),
+    email: 'maria@example.com',
+    password: 'cliente123',
+  ),
+  Customer(
+    cedula: '0912345678',
+    name: 'Carlos Mendoza',
+    address: 'Av. Francisco de Orellana',
+    phone: '0987654321',
+    city: 'Guayaquil',
+    registeredAt: DateTime(2026, 2, 8),
+    email: 'carlos@example.com',
+    password: 'cliente123',
+  ),
+];
 
 const products = [
   // Catálogo inicial que se copia al estado de StoreHomeScreen.
@@ -81,6 +391,7 @@ const products = [
     price: 'USD 899.00',
     icon: Icons.kitchen,
     description: 'Amplio espacio y bajo consumo de energía.',
+    stock: 8,
   ),
   Product(
     name: 'Lavadora EcoWash 18 kg',
@@ -91,6 +402,7 @@ const products = [
     description: 'Programas inteligentes para el cuidado de tu ropa.',
     offerEnabled: true,
     offerPrice: 'USD 679.00',
+    stock: 5,
   ),
   Product(
     name: 'Televisor Smart 55 pulgadas',
@@ -101,6 +413,7 @@ const products = [
     description: 'Imagen 4K y entretenimiento para toda la familia.',
     offerEnabled: true,
     offerPrice: 'USD 599.00',
+    stock: 3,
   ),
   Product(
     name: 'Microondas Digital 30 L',
@@ -109,6 +422,7 @@ const products = [
     price: 'USD 299.00',
     icon: Icons.microwave,
     description: 'Cocina y calienta tus alimentos de forma práctica.',
+    stock: 10,
   ),
   Product(
     name: 'Aire acondicionado 12 000 BTU',
@@ -117,6 +431,7 @@ const products = [
     price: 'USD 899.00',
     icon: Icons.ac_unit,
     description: 'Confort y temperatura ideal durante todo el año.',
+    stock: 4,
   ),
 ];
 
@@ -128,6 +443,7 @@ const defaultCategories = [
   'Climatización',
 ];
 
+// Pantalla principal con catálogo, categorías, ofertas y menú lateral.
 class StoreHomeScreen extends StatefulWidget {
   const StoreHomeScreen({super.key});
 
@@ -135,11 +451,53 @@ class StoreHomeScreen extends StatefulWidget {
   State<StoreHomeScreen> createState() => _StoreHomeScreenState();
 }
 
+// Estado compartido durante la sesión actual de la tienda.
 class _StoreHomeScreenState extends State<StoreHomeScreen> {
   // Esta lista cambia cuando se agrega o edita un producto.
   List<Product> _products = List<Product>.from(products);
   // Esta lista alimenta la pestaña Categorías y los formularios de productos.
   List<String> _categories = List<String>.from(defaultCategories);
+  List<Customer> _customers = List<Customer>.from(defaultCustomers);
+  List<Order> _orders = [];
+  final List<SurveyResponse> _surveys = [];
+  Customer? _loggedCustomer;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadPersistedData();
+  }
+
+  // Carga los datos existentes de Firestore y conserva los datos iniciales
+  // cuando la base aún está vacía o Firebase no está disponible.
+  Future<void> _loadPersistedData() async {
+    if (!FirebaseStoreRepository.isAvailable) return;
+    try {
+      final savedProducts = await FirebaseStoreRepository.loadProducts();
+      final savedCategories = await FirebaseStoreRepository.loadCategories();
+      final savedCustomers = await FirebaseStoreRepository.loadCustomers();
+      final savedOrders = await FirebaseStoreRepository.loadOrders();
+      final savedSurveys = await FirebaseStoreRepository.loadSurveys();
+      if (!mounted) return;
+      setState(() {
+        if (savedProducts.isNotEmpty) _products = savedProducts;
+        if (savedCategories.isNotEmpty) _categories = savedCategories;
+        if (savedCustomers.isNotEmpty) _customers = savedCustomers;
+        _orders = savedOrders;
+        _surveys
+          ..clear()
+          ..addAll(savedSurveys);
+      });
+      if (savedProducts.isEmpty) {
+        await FirebaseStoreRepository.saveProducts(_products);
+      }
+      if (savedCategories.isEmpty) {
+        await FirebaseStoreRepository.saveCategories(_categories);
+      }
+    } catch (error) {
+      debugPrint('No se pudieron cargar datos de Firebase: $error');
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -166,26 +524,104 @@ class _StoreHomeScreenState extends State<StoreHomeScreen> {
         ),
         drawer: StoreDrawer(
           onManageProducts: () => _openProductManager(context),
+          onManageCustomers: () => _openCustomerManager(context),
+          onCustomerRegistered: (customer) => setState(() {
+            _customers.add(customer);
+            FirebaseStoreRepository.saveCustomer(customer);
+          }),
+          onSurveySubmitted: (survey) => setState(() {
+            _surveys.add(survey);
+            FirebaseStoreRepository.saveSurvey(survey);
+          }),
         ),
         body: TabBarView(
           children: [
-            ProductList(products: _products),
+            ProductList(
+              products: _products,
+              customer: _loggedCustomer,
+              onOrder: _createOrder,
+            ),
             CategoryList(categories: _categories),
-            ProductList(products: _products, showOffer: true),
+            ProductList(
+              products: _products,
+              showOffer: true,
+              customer: _loggedCustomer,
+              onOrder: _createOrder,
+            ),
           ],
         ),
       ),
     );
   }
 
+  // Abre el login y recibe el cliente autenticado o la entrada del administrador.
   void _openLogin(BuildContext context) {
-    // Push coloca la pantalla de inicio de sesión encima de la pantalla actual.
     Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => const LoginScreen()),
+      MaterialPageRoute(
+        builder: (_) => LoginScreen(
+          customers: _customers,
+          onCustomerLogin: (customer) =>
+              setState(() => _loggedCustomer = customer),
+          onAdminLogin: () => _openAdmin(context),
+        ),
+      ),
     );
   }
 
+  // Verifica el stock, descuenta las unidades y crea el pedido persistente.
+  void _createOrder(Product product, int quantity) {
+    final customer = _loggedCustomer;
+    if (customer == null) {
+      _openLogin(context);
+      return;
+    }
+    setState(() {
+      _products = _products
+          .map(
+            (item) => item == product
+                ? item.copyWith(stock: item.stock - quantity)
+                : item,
+          )
+          .toList();
+      _orders.add(
+        Order(
+          customerEmail: customer.email,
+          productName: product.name,
+          quantity: quantity,
+          createdAt: DateTime.now(),
+        ),
+      );
+    });
+    FirebaseStoreRepository.saveProducts(_products);
+    FirebaseStoreRepository.saveOrder(_orders.last);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Pedido solicitado: ${product.name}')),
+    );
+  }
+
+  // Abre el panel donde el administrador gestiona pedidos y encuestas.
+  void _openAdmin(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => AdminDashboardScreen(
+          orders: _orders,
+          surveys: _surveys,
+          onOrdersChanged: (orders) {
+            setState(() => _orders = orders);
+            for (final order in orders) {
+              if (order.id != null) {
+                FirebaseStoreRepository.updateOrder(order.id!, order);
+              }
+            }
+          },
+        ),
+      ),
+    );
+  }
+
+  // Abre la administración de productos y aplica los cambios al catálogo.
   Future<void> _openProductManager(BuildContext context) async {
     // Primero se cierra el menú lateral.
     Navigator.pop(context);
@@ -205,19 +641,42 @@ class _StoreHomeScreenState extends State<StoreHomeScreen> {
     if (updatedProducts != null) {
       // setState redibuja las tres pestañas usando los productos actualizados.
       setState(() => _products = updatedProducts);
+      await FirebaseStoreRepository.saveProducts(_products);
+    }
+  }
+
+  // Abre la administración de clientes y actualiza la lista local al regresar.
+  Future<void> _openCustomerManager(BuildContext context) async {
+    Navigator.pop(context);
+    final updatedCustomers = await Navigator.push<List<Customer>>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CustomerManagerScreen(customers: _customers),
+      ),
+    );
+    if (updatedCustomers != null) {
+      setState(() => _customers = updatedCustomers);
+      for (final customer in _customers) {
+        await FirebaseStoreRepository.saveCustomer(customer);
+      }
     }
   }
 }
 
+// Lista reutilizable para el catálogo general y la pestaña de ofertas.
 class ProductList extends StatelessWidget {
   const ProductList({
     required this.products,
     this.showOffer = false,
+    this.customer,
+    this.onOrder,
     super.key,
   });
 
   final List<Product> products;
   final bool showOffer;
+  final Customer? customer;
+  final void Function(Product product, int quantity)? onOrder;
 
   @override
   Widget build(BuildContext context) {
@@ -253,24 +712,38 @@ class ProductList extends StatelessWidget {
               ),
             ),
             isThreeLine: true,
-            trailing: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
+            minVerticalPadding: 12,
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                if (showOffer)
-                  // La etiqueta muestra el precio promocional cuando existe.
-                  Text(
-                    product.offerPrice.isEmpty
-                        ? 'OFERTA'
-                        : 'OFERTA ${product.offerPrice}',
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.error,
-                      fontSize: 11,
+                Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (showOffer)
+                      // La etiqueta muestra el precio promocional cuando existe.
+                      Text(
+                        product.offerPrice.isEmpty
+                            ? 'OFERTA'
+                            : 'OFERTA ${product.offerPrice}',
+                        style: TextStyle(
+                          color: Theme.of(context).colorScheme.error,
+                          fontSize: 11,
+                        ),
+                      ),
+                    Text(
+                      product.price,
+                      style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
-                  ),
-                Text(
-                  product.price,
-                  style: const TextStyle(fontWeight: FontWeight.bold),
+                    Text('Stock: ${product.stock}'),
+                  ],
                 ),
+                if (product.stock > 0 && onOrder != null)
+                  IconButton(
+                    tooltip: 'Solicitar producto',
+                    onPressed: () => _askQuantity(context, product),
+                    icon: const Icon(Icons.add_shopping_cart_outlined),
+                  ),
               ],
             ),
           ),
@@ -278,8 +751,44 @@ class ProductList extends StatelessWidget {
       },
     );
   }
+
+  // Pide una cantidad válida antes de enviar la solicitud de compra.
+  Future<void> _askQuantity(BuildContext context, Product product) async {
+    final controller = TextEditingController(text: '1');
+    final quantity = await showDialog<int>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Solicitar ${product.name}'),
+        content: TextField(
+          controller: controller,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(
+            labelText: 'Cantidad (máximo ${product.stock})',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final value = int.tryParse(controller.text) ?? 0;
+              if (value > 0 && value <= product.stock) {
+                Navigator.pop(context, value);
+              }
+            },
+            child: const Text('Confirmar'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (quantity != null) onOrder?.call(product, quantity);
+  }
 }
 
+// Muestra las categorías disponibles para navegar visualmente el catálogo.
 class CategoryList extends StatelessWidget {
   const CategoryList({this.categories = defaultCategories, super.key});
 
@@ -303,6 +812,7 @@ class CategoryList extends StatelessWidget {
 }
 
 // El ícono ayuda a reconocer una categoría; las nuevas usan un ícono genérico.
+// Selecciona un icono representativo para cada categoría.
 IconData categoryIcon(String category) {
   switch (category) {
     case 'Línea blanca':
@@ -318,6 +828,7 @@ IconData categoryIcon(String category) {
   }
 }
 
+// Muestra la imagen local, la imagen remota o el icono de respaldo del producto.
 class ProductImage extends StatelessWidget {
   const ProductImage({required this.product, this.radius = 28, super.key});
 
@@ -357,10 +868,20 @@ class ProductImage extends StatelessWidget {
   }
 }
 
+// Menú lateral para acceder a login, registros y herramientas administrativas.
 class StoreDrawer extends StatelessWidget {
-  const StoreDrawer({required this.onManageProducts, super.key});
+  const StoreDrawer({
+    required this.onManageProducts,
+    required this.onManageCustomers,
+    required this.onCustomerRegistered,
+    required this.onSurveySubmitted,
+    super.key,
+  });
 
   final VoidCallback onManageProducts;
+  final VoidCallback onManageCustomers;
+  final ValueChanged<Customer> onCustomerRegistered;
+  final ValueChanged<SurveyResponse> onSurveySubmitted;
 
   @override
   Widget build(BuildContext context) {
@@ -420,10 +941,17 @@ class StoreDrawer extends StatelessWidget {
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => const CustomerRegistrationScreen(),
+                  builder: (_) => CustomerRegistrationScreen(
+                    onRegistered: onCustomerRegistered,
+                  ),
                 ),
               );
             },
+          ),
+          ListTile(
+            leading: const Icon(Icons.manage_accounts_outlined),
+            title: const Text('Gestionar clientes'),
+            onTap: onManageCustomers,
           ),
           ListTile(
             leading: const Icon(Icons.inventory_2_outlined),
@@ -438,18 +966,9 @@ class StoreDrawer extends StatelessWidget {
               Navigator.pop(context);
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (_) => const SurveyScreen()),
-              );
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.touch_app_outlined),
-            title: const Text('Actividad de gestos'),
-            onTap: () {
-              Navigator.pop(context);
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const GestureScreen()),
+                MaterialPageRoute(
+                  builder: (_) => SurveyScreen(onSubmitted: onSurveySubmitted),
+                ),
               );
             },
           ),
@@ -459,6 +978,7 @@ class StoreDrawer extends StatelessWidget {
   }
 }
 
+// Pantalla administrativa que lista, crea y edita productos.
 class ProductManagerScreen extends StatefulWidget {
   const ProductManagerScreen({
     required this.products,
@@ -475,6 +995,7 @@ class ProductManagerScreen extends StatefulWidget {
   State<ProductManagerScreen> createState() => _ProductManagerScreenState();
 }
 
+// Estado temporal de productos y categorías mientras se administra el catálogo.
 class _ProductManagerScreenState extends State<ProductManagerScreen> {
   // Copia temporal: los cambios se confirman al volver a la pantalla principal.
   late List<Product> _products;
@@ -534,6 +1055,7 @@ class _ProductManagerScreenState extends State<ProductManagerScreen> {
           price: product.price,
           icon: product.icon,
           description: product.description,
+          stock: product.stock,
           imageUrl: product.imageUrl,
           imagePath: product.imagePath,
           offerEnabled: product.offerEnabled,
@@ -612,6 +1134,7 @@ class _ProductManagerScreenState extends State<ProductManagerScreen> {
 }
 
 // Pantalla para activar/desactivar ofertas y cambiar sus precios promocionales.
+// Pantalla para activar ofertas y definir precios promocionales.
 class OfferManagerScreen extends StatefulWidget {
   const OfferManagerScreen({required this.products, super.key});
 
@@ -621,6 +1144,7 @@ class OfferManagerScreen extends StatefulWidget {
   State<OfferManagerScreen> createState() => _OfferManagerScreenState();
 }
 
+// Copia editable del catálogo usada por la administración de ofertas.
 class _OfferManagerScreenState extends State<OfferManagerScreen> {
   // Copia temporal de productos mientras se administran las ofertas.
   late List<Product> _products;
@@ -728,6 +1252,7 @@ class _OfferManagerScreenState extends State<OfferManagerScreen> {
 }
 
 // Resultado que devuelve la pantalla de categorías al guardar sus cambios.
+// Resultado de la pantalla de categorías: lista final y nombres renombrados.
 class CategoryChange {
   const CategoryChange({required this.categories, required this.renamed});
 
@@ -736,6 +1261,7 @@ class CategoryChange {
   final Map<String, String> renamed;
 }
 
+// Pantalla para crear, renombrar y eliminar categorías.
 class CategoryManagerScreen extends StatefulWidget {
   const CategoryManagerScreen({required this.categories, super.key});
 
@@ -745,6 +1271,7 @@ class CategoryManagerScreen extends StatefulWidget {
   State<CategoryManagerScreen> createState() => _CategoryManagerScreenState();
 }
 
+// Estado temporal de categorías hasta que el administrador confirma el regreso.
 class _CategoryManagerScreenState extends State<CategoryManagerScreen> {
   // Copia local para confirmar las categorías al regresar.
   late List<String> _categories;
@@ -890,6 +1417,7 @@ class _CategoryManagerScreenState extends State<CategoryManagerScreen> {
   }
 }
 
+// Formulario para crear o actualizar los datos de un producto.
 class ProductEditorScreen extends StatefulWidget {
   const ProductEditorScreen({
     required this.categories,
@@ -904,6 +1432,7 @@ class ProductEditorScreen extends StatefulWidget {
   State<ProductEditorScreen> createState() => _ProductEditorScreenState();
 }
 
+// Controla validación, campos, stock e imagen del producto editado.
 class _ProductEditorScreenState extends State<ProductEditorScreen> {
   // Los controllers mantienen sincronizado cada campo del formulario.
   final _formKey = GlobalKey<FormState>();
@@ -911,6 +1440,7 @@ class _ProductEditorScreenState extends State<ProductEditorScreen> {
   late final TextEditingController _typeController;
   late final TextEditingController _priceController;
   late final TextEditingController _descriptionController;
+  late final TextEditingController _stockController;
   late final TextEditingController _imageUrlController;
   String _imagePath = '';
   late String _category;
@@ -925,6 +1455,7 @@ class _ProductEditorScreenState extends State<ProductEditorScreen> {
     _typeController = TextEditingController(text: product?.type);
     _priceController = TextEditingController(text: product?.price);
     _descriptionController = TextEditingController(text: product?.description);
+    _stockController = TextEditingController(text: '${product?.stock ?? 0}');
     _imageUrlController = TextEditingController(text: product?.imageUrl);
     _imagePath = product?.imagePath ?? '';
     _category = widget.categories.contains(product?.category)
@@ -939,6 +1470,7 @@ class _ProductEditorScreenState extends State<ProductEditorScreen> {
     _typeController.dispose();
     _priceController.dispose();
     _descriptionController.dispose();
+    _stockController.dispose();
     _imageUrlController.dispose();
     super.dispose();
   }
@@ -957,6 +1489,7 @@ class _ProductEditorScreenState extends State<ProductEditorScreen> {
         price: _priceController.text.trim(),
         icon: oldProduct?.icon ?? Icons.devices_other,
         description: _descriptionController.text.trim(),
+        stock: int.tryParse(_stockController.text.trim()) ?? 0,
         imageUrl: _imageUrlController.text.trim(),
         imagePath: _imagePath,
         offerEnabled: oldProduct?.offerEnabled ?? false,
@@ -1066,6 +1599,19 @@ class _ProductEditorScreenState extends State<ProductEditorScreen> {
             ),
             const SizedBox(height: 16),
             TextFormField(
+              controller: _stockController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: 'Stock disponible',
+                prefixIcon: Icon(Icons.inventory_2_outlined),
+                border: OutlineInputBorder(),
+              ),
+              validator: (value) => int.tryParse(value ?? '') == null
+                  ? 'Ingresa una cantidad válida'
+                  : null,
+            ),
+            const SizedBox(height: 16),
+            TextFormField(
               controller: _imageUrlController,
               keyboardType: TextInputType.url,
               decoration: const InputDecoration(
@@ -1105,14 +1651,138 @@ class _ProductEditorScreenState extends State<ProductEditorScreen> {
   }
 }
 
+// Panel privado del administrador con las pestañas de pedidos y encuestas.
+class AdminDashboardScreen extends StatefulWidget {
+  const AdminDashboardScreen({
+    required this.orders,
+    required this.surveys,
+    required this.onOrdersChanged,
+    super.key,
+  });
+
+  final List<Order> orders;
+  final List<SurveyResponse> surveys;
+  final ValueChanged<List<Order>> onOrdersChanged;
+
+  @override
+  State<AdminDashboardScreen> createState() => _AdminDashboardScreenState();
+}
+
+// Mantiene los estados de pedidos visibles mientras el panel está abierto.
+class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
+  late List<Order> _orders;
+
+  @override
+  void initState() {
+    super.initState();
+    _orders = List<Order>.from(widget.orders);
+  }
+
+  void _changeStatus(int index, OrderStatus status) {
+    // Actualiza localmente y notifica a la tienda para sincronizar Firestore.
+    setState(() => _orders[index] = _orders[index].copyWith(status: status));
+    widget.onOrdersChanged(_orders);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DefaultTabController(
+      length: 2,
+      child: Scaffold(
+        appBar: AppBar(
+          title: const Text('Panel Administrador'),
+          bottom: const TabBar(
+            tabs: [
+              Tab(text: 'Pedidos'),
+              Tab(text: 'Encuestas'),
+            ],
+          ),
+        ),
+        body: TabBarView(
+          children: [
+            _orders.isEmpty
+                ? const Center(child: Text('No hay pedidos recibidos'))
+                : ListView.builder(
+                    padding: const EdgeInsets.all(16),
+                    itemCount: _orders.length,
+                    itemBuilder: (context, index) {
+                      final order = _orders[index];
+                      return Card(
+                        child: ListTile(
+                          title: Text(order.productName),
+                          subtitle: Text(
+                            '${order.customerEmail} · Cantidad: ${order.quantity}',
+                          ),
+                          trailing: DropdownButton<OrderStatus>(
+                            value: order.status,
+                            onChanged: (value) {
+                              if (value != null) _changeStatus(index, value);
+                            },
+                            items: const [
+                              DropdownMenuItem(
+                                value: OrderStatus.solicitado,
+                                child: Text('Solicitado'),
+                              ),
+                              DropdownMenuItem(
+                                value: OrderStatus.despachado,
+                                child: Text('Despachado'),
+                              ),
+                              DropdownMenuItem(
+                                value: OrderStatus.ventaRealizada,
+                                child: Text('Venta realizada'),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+            widget.surveys.isEmpty
+                ? const Center(child: Text('No hay encuestas recibidas'))
+                : ListView.builder(
+                    padding: const EdgeInsets.all(16),
+                    itemCount: widget.surveys.length,
+                    itemBuilder: (context, index) {
+                      final survey = widget.surveys[index];
+                      return Card(
+                        child: ListTile(
+                          title: Text(
+                            '${survey.name} · ${survey.satisfaction}',
+                          ),
+                          subtitle: Text(
+                            '${survey.email}\n${survey.service}: ${survey.comments}',
+                          ),
+                          isThreeLine: true,
+                        ),
+                      );
+                    },
+                  ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 // Pantalla de acceso: valida correo y contraseña antes de mostrar confirmación.
+// Pantalla de acceso para clientes registrados y administrador.
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
+  const LoginScreen({
+    this.customers = const [],
+    this.onCustomerLogin,
+    this.onAdminLogin,
+    super.key,
+  });
+
+  final List<Customer> customers;
+  final ValueChanged<Customer>? onCustomerLogin;
+  final VoidCallback? onAdminLogin;
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
+// Controla validación y comparación de credenciales de acceso.
 class _LoginScreenState extends State<LoginScreen> {
   // La llave permite ejecutar la validación de todos los campos del formulario.
   final _formKey = GlobalKey<FormState>();
@@ -1128,9 +1798,32 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   void _login() {
+    // El administrador usa credenciales fijas; los clientes se buscan en la lista
+    // cargada desde Firestore o creada durante la sesión.
     // validate ejecuta los validators definidos en los campos.
     if (!(_formKey.currentState?.validate() ?? false)) return;
-    // Si todo es válido, se informa al usuario con un SnackBar.
+    final user = _emailController.text.trim();
+    final password = _passwordController.text;
+    if ((user == 'ElecAdmin' || user == 'Administrador ElecAdmin') &&
+        password == 'Usuari0100*') {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Sesión de administrador iniciada')),
+      );
+      _emailController.clear();
+      _passwordController.clear();
+      widget.onAdminLogin?.call();
+      return;
+    }
+    final customer = widget.customers
+        .where((item) => item.email == user && item.password == password)
+        .firstOrNull;
+    if (customer == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Correo o contraseña incorrectos')),
+      );
+      return;
+    }
+    widget.onCustomerLogin?.call(customer);
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Sesión iniciada correctamente')),
     );
@@ -1166,7 +1859,11 @@ class _LoginScreenState extends State<LoginScreen> {
                 prefixIcon: Icon(Icons.email_outlined),
                 border: OutlineInputBorder(),
               ),
-              validator: (value) => value == null || !value.contains('@')
+              validator: (value) =>
+                  value == null ||
+                      (value != 'ElecAdmin' &&
+                          value != 'Administrador ElecAdmin' &&
+                          !value.contains('@'))
                   ? 'Ingresa un correo válido'
                   : null,
             ),
@@ -1207,14 +1904,18 @@ class _LoginScreenState extends State<LoginScreen> {
 }
 
 // Pantalla para capturar los datos básicos de un nuevo cliente.
+// Formulario público para registrar una nueva cuenta de cliente.
 class CustomerRegistrationScreen extends StatefulWidget {
-  const CustomerRegistrationScreen({super.key});
+  const CustomerRegistrationScreen({this.onRegistered, super.key});
+
+  final ValueChanged<Customer>? onRegistered;
 
   @override
   State<CustomerRegistrationScreen> createState() =>
       _CustomerRegistrationScreenState();
 }
 
+// Estado y controladores del formulario de registro público.
 class _CustomerRegistrationScreenState
     extends State<CustomerRegistrationScreen> {
   // Cada campo tiene su propio controller para leer y liberar su contenido.
@@ -1224,6 +1925,8 @@ class _CustomerRegistrationScreenState
   final _addressController = TextEditingController();
   final _phoneController = TextEditingController();
   final _cityController = TextEditingController();
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
 
   @override
   void dispose() {
@@ -1234,6 +1937,8 @@ class _CustomerRegistrationScreenState
       _addressController,
       _phoneController,
       _cityController,
+      _emailController,
+      _passwordController,
     ]) {
       controller.dispose();
     }
@@ -1244,8 +1949,20 @@ class _CustomerRegistrationScreenState
       value == null || value.trim().isEmpty ? '$label es obligatorio' : null;
 
   void _register() {
+    // Construye el cliente, lo devuelve a la tienda y dispara su persistencia.
     // El registro solo continúa si todos los campos obligatorios tienen datos.
     if (!(_formKey.currentState?.validate() ?? false)) return;
+    final customer = Customer(
+      cedula: _cedulaController.text.trim(),
+      name: _nameController.text.trim(),
+      address: _addressController.text.trim(),
+      phone: _phoneController.text.trim(),
+      city: _cityController.text.trim(),
+      email: _emailController.text.trim(),
+      password: _passwordController.text,
+      registeredAt: DateTime.now(),
+    );
+    widget.onRegistered?.call(customer);
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Cliente registrado correctamente')),
     );
@@ -1280,6 +1997,18 @@ class _CustomerRegistrationScreenState
               keyboardType: TextInputType.phone,
             ),
             _field(_cityController, 'Ciudad', Icons.location_city_outlined),
+            _field(
+              _emailController,
+              'Correo electrónico',
+              Icons.email_outlined,
+              keyboardType: TextInputType.emailAddress,
+            ),
+            _field(
+              _passwordController,
+              'Contraseña',
+              Icons.lock_outline,
+              obscureText: true,
+            ),
             const SizedBox(height: 12),
             FilledButton.icon(
               onPressed: _register,
@@ -1297,6 +2026,7 @@ class _CustomerRegistrationScreenState
     String label,
     IconData icon, {
     TextInputType? keyboardType,
+    bool obscureText = false,
   }) {
     // Método reutilizable para construir los cinco campos del registro.
     return Padding(
@@ -1304,6 +2034,7 @@ class _CustomerRegistrationScreenState
       child: TextFormField(
         controller: controller,
         keyboardType: keyboardType,
+        obscureText: obscureText,
         decoration: InputDecoration(
           labelText: label,
           prefixIcon: Icon(icon),
@@ -1315,6 +2046,359 @@ class _CustomerRegistrationScreenState
   }
 }
 
+// Pantalla administrativa de búsqueda, edición y eliminación de clientes.
+class CustomerManagerScreen extends StatefulWidget {
+  const CustomerManagerScreen({required this.customers, super.key});
+
+  final List<Customer> customers;
+
+  @override
+  State<CustomerManagerScreen> createState() => _CustomerManagerScreenState();
+}
+
+// Estado de filtros y lista editable de clientes.
+class _CustomerManagerScreenState extends State<CustomerManagerScreen> {
+  late List<Customer> _customers;
+  final _cedulaSearchController = TextEditingController();
+  DateTime? _registeredDate;
+
+  @override
+  void initState() {
+    super.initState();
+    _customers = List<Customer>.from(widget.customers);
+    _cedulaSearchController.addListener(_refreshResults);
+  }
+
+  @override
+  void dispose() {
+    _cedulaSearchController
+      ..removeListener(_refreshResults)
+      ..dispose();
+    super.dispose();
+  }
+
+  void _refreshResults() => setState(() {});
+
+  List<Customer> get _visibleCustomers {
+    final cedula = _cedulaSearchController.text.trim();
+    return _customers.where((customer) {
+      final matchesCedula = cedula.isEmpty || customer.cedula.contains(cedula);
+      final matchesDate =
+          _registeredDate == null ||
+          _sameDate(customer.registeredAt, _registeredDate!);
+      return matchesCedula && matchesDate;
+    }).toList();
+  }
+
+  Future<void> _chooseDate() async {
+    final selected = await showDatePicker(
+      context: context,
+      firstDate: DateTime(2020),
+      lastDate: DateTime.now(),
+      initialDate: _registeredDate ?? DateTime.now(),
+      helpText: 'Filtrar fecha de registro',
+    );
+    if (selected != null) setState(() => _registeredDate = selected);
+  }
+
+  Future<void> _editCustomer([Customer? customer]) async {
+    final result = await Navigator.push<Customer>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => CustomerEditorScreen(customer: customer),
+      ),
+    );
+    if (result == null) return;
+    setState(() {
+      final index = customer == null ? -1 : _customers.indexOf(customer);
+      if (index == -1) {
+        _customers.add(result);
+      } else {
+        _customers[index] = result;
+      }
+    });
+  }
+
+  Future<void> _deleteCustomer(Customer customer) async {
+    final shouldDelete = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Eliminar cliente'),
+        content: Text('¿Eliminar a ${customer.name}?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Eliminar'),
+          ),
+        ],
+      ),
+    );
+    if (shouldDelete == true) {
+      setState(() => _customers.remove(customer));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final visibleCustomers = _visibleCustomers;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Registro de clientes'),
+        leading: IconButton(
+          tooltip: 'Guardar cambios',
+          icon: const Icon(Icons.arrow_back),
+          onPressed: () => Navigator.pop(context, _customers),
+        ),
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _editCustomer,
+        icon: const Icon(Icons.person_add),
+        label: const Text('Nuevo cliente'),
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+            child: TextField(
+              controller: _cedulaSearchController,
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(
+                labelText: 'Consultar por cédula',
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: _cedulaSearchController.text.isEmpty
+                    ? null
+                    : IconButton(
+                        tooltip: 'Limpiar búsqueda',
+                        icon: const Icon(Icons.clear),
+                        onPressed: _cedulaSearchController.clear,
+                      ),
+                border: const OutlineInputBorder(),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _chooseDate,
+                    icon: const Icon(Icons.calendar_month_outlined),
+                    label: Text(
+                      _registeredDate == null
+                          ? 'Filtrar por fecha'
+                          : 'Registro: ${_formatDate(_registeredDate!)}',
+                    ),
+                  ),
+                ),
+                if (_registeredDate != null)
+                  IconButton(
+                    tooltip: 'Quitar filtro de fecha',
+                    icon: const Icon(Icons.filter_alt_off_outlined),
+                    onPressed: () => setState(() => _registeredDate = null),
+                  ),
+              ],
+            ),
+          ),
+          Expanded(
+            child: visibleCustomers.isEmpty
+                ? const Center(child: Text('No hay clientes para mostrar'))
+                : ListView.separated(
+                    padding: const EdgeInsets.all(16),
+                    itemCount: visibleCustomers.length,
+                    separatorBuilder: (_, _) => const SizedBox(height: 8),
+                    itemBuilder: (context, index) {
+                      final customer = visibleCustomers[index];
+                      return Card(
+                        child: ListTile(
+                          leading: CircleAvatar(
+                            child: Text(customer.name.substring(0, 1)),
+                          ),
+                          title: Text(customer.name),
+                          subtitle: Text(
+                            'Cédula: ${customer.cedula}\n'
+                            '${customer.city} · Registrado: '
+                            '${_formatDate(customer.registeredAt)}',
+                          ),
+                          isThreeLine: true,
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              IconButton(
+                                tooltip: 'Editar cliente',
+                                icon: const Icon(Icons.edit_outlined),
+                                onPressed: () => _editCustomer(customer),
+                              ),
+                              IconButton(
+                                tooltip: 'Eliminar cliente',
+                                icon: const Icon(Icons.delete_outline),
+                                onPressed: () => _deleteCustomer(customer),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// Formulario interno para crear o modificar un cliente desde administración.
+class CustomerEditorScreen extends StatefulWidget {
+  const CustomerEditorScreen({this.customer, super.key});
+
+  final Customer? customer;
+
+  @override
+  State<CustomerEditorScreen> createState() => _CustomerEditorScreenState();
+}
+
+// Controla los campos y validaciones del editor de clientes.
+class _CustomerEditorScreenState extends State<CustomerEditorScreen> {
+  final _formKey = GlobalKey<FormState>();
+  late final TextEditingController _cedulaController;
+  late final TextEditingController _nameController;
+  late final TextEditingController _addressController;
+  late final TextEditingController _phoneController;
+  late final TextEditingController _cityController;
+  late final TextEditingController _emailController;
+  late final TextEditingController _passwordController;
+
+  @override
+  void initState() {
+    super.initState();
+    final customer = widget.customer;
+    _cedulaController = TextEditingController(text: customer?.cedula);
+    _nameController = TextEditingController(text: customer?.name);
+    _addressController = TextEditingController(text: customer?.address);
+    _phoneController = TextEditingController(text: customer?.phone);
+    _cityController = TextEditingController(text: customer?.city);
+    _emailController = TextEditingController(text: customer?.email);
+    _passwordController = TextEditingController(text: customer?.password);
+  }
+
+  @override
+  void dispose() {
+    for (final controller in [
+      _cedulaController,
+      _nameController,
+      _addressController,
+      _phoneController,
+      _cityController,
+      _emailController,
+      _passwordController,
+    ]) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  String? _required(String? value, String label) =>
+      value == null || value.trim().isEmpty ? '$label es obligatorio' : null;
+
+  void _save() {
+    if (!(_formKey.currentState?.validate() ?? false)) return;
+    final customer = Customer(
+      cedula: _cedulaController.text.trim(),
+      name: _nameController.text.trim(),
+      address: _addressController.text.trim(),
+      phone: _phoneController.text.trim(),
+      city: _cityController.text.trim(),
+      email: _emailController.text.trim(),
+      password: _passwordController.text,
+      registeredAt: widget.customer?.registeredAt ?? DateTime.now(),
+    );
+    Navigator.pop(context, customer);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isEditing = widget.customer != null;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(isEditing ? 'Actualizar cliente' : 'Crear cliente'),
+      ),
+      body: Form(
+        key: _formKey,
+        child: ListView(
+          padding: const EdgeInsets.all(24),
+          children: [
+            Text(
+              isEditing ? 'Actualizar datos del cliente' : 'Nuevo cliente',
+              style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 20),
+            _field(
+              _cedulaController,
+              'Cédula',
+              Icons.badge_outlined,
+              keyboardType: TextInputType.number,
+            ),
+            _field(_nameController, 'Nombre completo', Icons.person_outline),
+            _field(_addressController, 'Dirección', Icons.home_outlined),
+            _field(
+              _phoneController,
+              'Teléfono',
+              Icons.phone_outlined,
+              keyboardType: TextInputType.phone,
+            ),
+            _field(_cityController, 'Ciudad', Icons.location_city_outlined),
+            const SizedBox(height: 8),
+            FilledButton.icon(
+              onPressed: _save,
+              icon: const Icon(Icons.save_outlined),
+              label: Text(isEditing ? 'Actualizar cliente' : 'Crear cliente'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _field(
+    TextEditingController controller,
+    String label,
+    IconData icon, {
+    TextInputType? keyboardType,
+    bool obscureText = false,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: TextFormField(
+        controller: controller,
+        keyboardType: keyboardType,
+        obscureText: obscureText,
+        decoration: InputDecoration(
+          labelText: label,
+          prefixIcon: Icon(icon),
+          border: const OutlineInputBorder(),
+        ),
+        validator: (value) => _required(value, label),
+      ),
+    );
+  }
+}
+
+// Compara fechas ignorando la hora para el filtro de registros.
+bool _sameDate(DateTime first, DateTime second) =>
+    first.year == second.year &&
+    first.month == second.month &&
+    first.day == second.day;
+
+// Convierte una fecha a formato corto día/mes/año.
+String _formatDate(DateTime date) =>
+    '${date.day.toString().padLeft(2, '0')}/'
+    '${date.month.toString().padLeft(2, '0')}/${date.year}';
+
+// Elemento visual de la cabecera de la encuesta.
 class PinkStarLogo extends StatelessWidget {
   const PinkStarLogo({super.key});
 
@@ -1345,13 +2429,18 @@ class PinkStarLogo extends StatelessWidget {
 }
 
 // Pantalla de encuesta de satisfacción del servicio.
+// Aquí se recopila la opinión del cliente sobre el servicio recibido.
+// Formulario para recopilar y guardar opiniones de los clientes.
 class SurveyScreen extends StatefulWidget {
-  const SurveyScreen({super.key});
+  const SurveyScreen({this.onSubmitted, super.key});
+
+  final ValueChanged<SurveyResponse>? onSubmitted;
 
   @override
   State<SurveyScreen> createState() => _SurveyScreenState();
 }
 
+// Estado de respuestas seleccionadas y textos de la encuesta.
 class _SurveyScreenState extends State<SurveyScreen> {
   // La llave valida los campos de texto y las selecciones del formulario.
   final _formKey = GlobalKey<FormState>();
@@ -1374,6 +2463,7 @@ class _SurveyScreenState extends State<SurveyScreen> {
   }
 
   void _submitSurvey() {
+    // Valida campos y selecciones antes de enviar la respuesta a Firestore.
     // Primero se validan textos y luego se comprueba que existan ambas opciones.
     final formValido = _formKey.currentState?.validate() ?? false;
     final tieneSatisfaccion = _satisfaction != null;
@@ -1390,6 +2480,15 @@ class _SurveyScreenState extends State<SurveyScreen> {
     }
 
     final nombre = _nameController.text.trim();
+    widget.onSubmitted?.call(
+      SurveyResponse(
+        name: nombre,
+        email: _emailController.text.trim(),
+        satisfaction: _satisfaction!,
+        service: _service!,
+        comments: _commentsController.text.trim(),
+      ),
+    );
     // Cuando todo está completo se confirma el envío al usuario.
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('Gracias $nombre, tu encuesta fue enviada.')),
@@ -1488,29 +2587,36 @@ class _SurveyScreenState extends State<SurveyScreen> {
                   '¿Qué tan satisfecho te sentiste con el servicio?',
                   style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                 ),
-                RadioListTile<String>(
-                  title: const Text('Muy satisfecho'),
-                  value: 'Muy satisfecho',
-                  groupValue: _satisfaction,
-                  onChanged: (value) => setState(() => _satisfaction = value),
-                ),
-                RadioListTile<String>(
-                  title: const Text('Satisfecho'),
-                  value: 'Satisfecho',
-                  groupValue: _satisfaction,
-                  onChanged: (value) => setState(() => _satisfaction = value),
-                ),
-                RadioListTile<String>(
-                  title: const Text('Neutral'),
-                  value: 'Neutral',
-                  groupValue: _satisfaction,
-                  onChanged: (value) => setState(() => _satisfaction = value),
-                ),
-                RadioListTile<String>(
-                  title: const Text('Insatisfecho'),
-                  value: 'Insatisfecho',
-                  groupValue: _satisfaction,
-                  onChanged: (value) => setState(() => _satisfaction = value),
+                // La respuesta se guarda como una sola opción seleccionada.
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    ChoiceChip(
+                      label: const Text('Muy satisfecho'),
+                      selected: _satisfaction == 'Muy satisfecho',
+                      onSelected: (_) =>
+                          setState(() => _satisfaction = 'Muy satisfecho'),
+                    ),
+                    ChoiceChip(
+                      label: const Text('Satisfecho'),
+                      selected: _satisfaction == 'Satisfecho',
+                      onSelected: (_) =>
+                          setState(() => _satisfaction = 'Satisfecho'),
+                    ),
+                    ChoiceChip(
+                      label: const Text('Neutral'),
+                      selected: _satisfaction == 'Neutral',
+                      onSelected: (_) =>
+                          setState(() => _satisfaction = 'Neutral'),
+                    ),
+                    ChoiceChip(
+                      label: const Text('Insatisfecho'),
+                      selected: _satisfaction == 'Insatisfecho',
+                      onSelected: (_) =>
+                          setState(() => _satisfaction = 'Insatisfecho'),
+                    ),
+                  ],
                 ),
                 if (_satisfaction == null)
                   const Padding(
@@ -1527,6 +2633,7 @@ class _SurveyScreenState extends State<SurveyScreen> {
                   '¿Cómo calificarías la atención recibida?',
                   style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
                 ),
+                // Esta lista desplegable representa la valoración general del servicio.
                 DropdownButtonFormField<String>(
                   initialValue: _service,
                   decoration: const InputDecoration(
@@ -1585,25 +2692,6 @@ class _SurveyScreenState extends State<SurveyScreen> {
                 const SizedBox(height: 20),
                 const Divider(),
                 const SizedBox(height: 20),
-
-                // Botón para navegar a la Actividad 2
-                OutlinedButton.icon(
-                  onPressed: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => const GestureScreen(),
-                      ),
-                    );
-                  },
-                  icon: const Icon(Icons.touch_app),
-                  label: const Text('Ir a Actividad 2: Manejo de Gestos'),
-                  style: OutlinedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    side: const BorderSide(color: Colors.pink),
-                    foregroundColor: Colors.pink,
-                  ),
-                ),
               ],
             ),
           ),
@@ -1614,6 +2702,7 @@ class _SurveyScreenState extends State<SurveyScreen> {
 }
 
 // Pantalla que demuestra eventos de toque y desplazamiento.
+// Pantalla heredada que demuestra eventos táctiles; no se muestra en el menú.
 class GestureScreen extends StatefulWidget {
   const GestureScreen({super.key});
 
@@ -1621,6 +2710,7 @@ class GestureScreen extends StatefulWidget {
   State<GestureScreen> createState() => _GestureScreenState();
 }
 
+// Guarda el mensaje y color resultantes del último gesto detectado.
 class _GestureScreenState extends State<GestureScreen> {
   // Estos valores cambian después de cada gesto detectado.
   String _gestureMessage = 'Toca o desliza sobre el cuadro';
