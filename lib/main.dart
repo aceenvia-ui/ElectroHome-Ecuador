@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -17,8 +18,15 @@ Future<void> main() async {
     await Firebase.initializeApp(
       options: DefaultFirebaseOptions.currentPlatform,
     );
-  } catch (_) {
-    // La app conserva el funcionamiento local hasta agregar la configuración Firebase.
+    if (FirebaseAuth.instance.currentUser == null) {
+      await FirebaseAuth.instance.signInAnonymously();
+    }
+  } on FirebaseAuthException catch (error) {
+    debugPrint('No se pudo autenticar la app en Firebase (${error.code}).');
+  } on FirebaseException catch (error) {
+    debugPrint('No se pudo inicializar Firebase (${error.code}).');
+  } catch (error) {
+    debugPrint('No se pudo iniciar Firebase: $error');
   }
   runApp(const MyApp());
 }
@@ -42,6 +50,29 @@ class FirebaseStoreRepository {
 
   // Convierte un texto en un identificador seguro para un documento Firestore.
   static String _key(String value) => value.replaceAll('/', '_');
+
+  static Future<void> _runWrite(
+    String operation,
+    Future<void> Function() write,
+  ) async {
+    try {
+      await write();
+    } on FirebaseException catch (error) {
+      debugPrint('No se pudo $operation en Firestore (${error.code}).');
+    }
+  }
+
+  static Future<T?> _runRead<T>(
+    String operation,
+    Future<T> Function() read,
+  ) async {
+    try {
+      return await read();
+    } on FirebaseException catch (error) {
+      debugPrint('No se pudo cargar $operation de Firestore (${error.code}).');
+      return null;
+    }
+  }
 
   // Lee todos los productos y transforma cada documento en un objeto Product.
   static Future<List<Product>> loadProducts() async {
@@ -68,35 +99,39 @@ class FirebaseStoreRepository {
   // Guarda el catálogo completo en una operación por lotes.
   static Future<void> saveProducts(List<Product> products) async {
     if (!isAvailable) return;
-    final batch = _database.batch();
-    for (final product in products) {
-      final reference = _collection('products').doc(_key(product.name));
-      batch.set(reference, {
-        'name': product.name,
-        'type': product.type,
-        'category': product.category,
-        'price': product.price,
-        'description': product.description,
-        'stock': product.stock,
-        'imageUrl': product.imageUrl,
-        'imagePath': product.imagePath,
-        'offerEnabled': product.offerEnabled,
-        'offerPrice': product.offerPrice,
-      });
-    }
-    await batch.commit();
+    await _runWrite('guardar productos', () async {
+      final batch = _database.batch();
+      for (final product in products) {
+        final reference = _collection('products').doc(_key(product.name));
+        batch.set(reference, {
+          'name': product.name,
+          'type': product.type,
+          'category': product.category,
+          'price': product.price,
+          'description': product.description,
+          'stock': product.stock,
+          'imageUrl': product.imageUrl,
+          'imagePath': product.imagePath,
+          'offerEnabled': product.offerEnabled,
+          'offerPrice': product.offerPrice,
+        });
+      }
+      await batch.commit();
+    });
   }
 
   // Persiste las categorías disponibles para la administración.
   static Future<void> saveCategories(List<String> categories) async {
     if (!isAvailable) return;
-    final batch = _database.batch();
-    for (final category in categories) {
-      batch.set(_collection('categories').doc(_key(category)), {
-        'name': category,
-      });
-    }
-    await batch.commit();
+    await _runWrite('guardar categorías', () async {
+      final batch = _database.batch();
+      for (final category in categories) {
+        batch.set(_collection('categories').doc(_key(category)), {
+          'name': category,
+        });
+      }
+      await batch.commit();
+    });
   }
 
   // Recupera las categorías almacenadas en Firestore.
@@ -111,48 +146,147 @@ class FirebaseStoreRepository {
   // Crea o actualiza un cliente usando su correo como identificador.
   static Future<void> saveCustomer(Customer customer) async {
     if (!isAvailable) return;
-    await _collection('customers').doc(_key(customer.email)).set({
-      'cedula': customer.cedula,
-      'name': customer.name,
-      'address': customer.address,
-      'phone': customer.phone,
-      'city': customer.city,
-      'email': customer.email,
-      'password': customer.password,
-      'registeredAt': customer.registeredAt.toIso8601String(),
+    await _runWrite('guardar cliente', () async {
+      await _collection('customers').doc(_key(customer.email)).set({
+        'cedula': customer.cedula,
+        'name': customer.name,
+        'address': customer.address,
+        'phone': customer.phone,
+        'city': customer.city,
+        'email': customer.email,
+        'password': customer.password,
+        'registeredAt': customer.registeredAt.toIso8601String(),
+      });
+    });
+  }
+
+  static Future<void> saveCustomers(List<Customer> customers) async {
+    if (!isAvailable || customers.isEmpty) return;
+    await _runWrite('guardar clientes iniciales', () async {
+      final batch = _database.batch();
+      for (final customer in customers) {
+        final reference = _collection('customers').doc(_key(customer.email));
+        batch.set(reference, {
+          'cedula': customer.cedula,
+          'name': customer.name,
+          'address': customer.address,
+          'phone': customer.phone,
+          'city': customer.city,
+          'email': customer.email,
+          'password': customer.password,
+          'registeredAt': customer.registeredAt.toIso8601String(),
+        });
+      }
+      await batch.commit();
+    });
+  }
+
+  static Future<void> replaceCustomers(List<Customer> customers) async {
+    if (!isAvailable) return;
+    await _runWrite('actualizar todos los clientes', () async {
+      final snapshot = await _collection('customers').get();
+      final batch = _database.batch();
+      final newDocumentIds = customers
+          .map((customer) => _key(customer.email))
+          .toSet();
+      for (final document in snapshot.docs) {
+        if (!newDocumentIds.contains(document.id)) {
+          batch.delete(document.reference);
+        }
+      }
+      for (final customer in customers) {
+        final reference = _collection('customers').doc(_key(customer.email));
+        batch.set(reference, {
+          'cedula': customer.cedula,
+          'name': customer.name,
+          'address': customer.address,
+          'phone': customer.phone,
+          'city': customer.city,
+          'email': customer.email,
+          'password': customer.password,
+          'registeredAt': customer.registeredAt.toIso8601String(),
+        });
+      }
+      await batch.commit();
     });
   }
 
   // Registra un nuevo pedido con estado inicial solicitado.
   static Future<void> saveOrder(Order order) async {
     if (!isAvailable) return;
-    await _collection('orders').add({
-      'customerEmail': order.customerEmail,
-      'productName': order.productName,
-      'quantity': order.quantity,
-      'createdAt': order.createdAt.toIso8601String(),
-      'status': order.status.name,
+    await _runWrite('guardar pedido', () async {
+      await _collection('orders').add({
+        'customerEmail': order.customerEmail,
+        'productName': order.productName,
+        'quantity': order.quantity,
+        'createdAt': order.createdAt.toIso8601String(),
+        'status': order.status.name,
+      });
     });
+  }
+
+  static Future<String?> saveReservation(Product product, Order order) async {
+    if (!isAvailable) return null;
+    final productReference = _collection('products').doc(_key(product.name));
+    final orderReference = _collection('orders').doc();
+    try {
+      await _database.runTransaction<void>((transaction) async {
+        final productSnapshot = await transaction.get(productReference);
+        if (!productSnapshot.exists) {
+          throw FirebaseException(
+            plugin: 'cloud_firestore',
+            code: 'not-found',
+            message: 'No existe el producto ${product.name}.',
+          );
+        }
+        final currentStock =
+            (productSnapshot.data()?['stock'] as num?)?.toInt() ?? 0;
+        if (order.quantity <= 0 || order.quantity > currentStock) {
+          throw FirebaseException(
+            plugin: 'cloud_firestore',
+            code: 'failed-precondition',
+            message: 'El stock disponible cambió.',
+          );
+        }
+        transaction.update(productReference, {
+          'stock': currentStock - order.quantity,
+        });
+        transaction.set(orderReference, {
+          'customerEmail': order.customerEmail,
+          'productName': order.productName,
+          'quantity': order.quantity,
+          'createdAt': order.createdAt.toIso8601String(),
+          'status': order.status.name,
+        });
+      });
+      return orderReference.id;
+    } on FirebaseException catch (error) {
+      debugPrint('No se pudo guardar la reserva en Firestore (${error.code}).');
+      return null;
+    }
   }
 
   // Actualiza únicamente el estado de un pedido existente.
   static Future<void> updateOrder(String orderId, Order order) async {
     if (!isAvailable) return;
-    await _collection('orders')
-        .doc(orderId)
-        .update({'status': order.status.name});
+    await _runWrite('actualizar pedido', () async {
+      await _collection('orders')
+          .doc(orderId)
+          .update({'status': order.status.name});
+    });
   }
 
   // Guarda las respuestas de la encuesta para consultarlas como administrador.
   static Future<void> saveSurvey(SurveyResponse survey) async {
     if (!isAvailable) return;
-    await _collection('surveys').add({
-      'name': survey.name,
-      'email': survey.email,
-      'satisfaction': survey.satisfaction,
-      'service': survey.service,
-      'comments': survey.comments,
-      'createdAt': FieldValue.serverTimestamp(),
+    await _runWrite('guardar encuesta', () async {
+      await _collection('surveys').add({
+        'name': survey.name,
+        'satisfaction': survey.satisfaction,
+        'service': survey.service,
+        'comments': survey.comments,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
     });
   }
 
@@ -209,7 +343,6 @@ class FirebaseStoreRepository {
       final data = document.data();
       return SurveyResponse(
         name: data['name'] as String? ?? '',
-        email: data['email'] as String? ?? '',
         satisfaction: data['satisfaction'] as String? ?? '',
         service: data['service'] as String? ?? '',
         comments: data['comments'] as String? ?? '',
@@ -309,6 +442,17 @@ class Customer {
   final DateTime registeredAt;
   final String email;
   final String password;
+
+  Customer copyWith({String? email, String? password}) => Customer(
+    cedula: cedula,
+    name: name,
+    address: address,
+    phone: phone,
+    city: city,
+    registeredAt: registeredAt,
+    email: email ?? this.email,
+    password: password ?? this.password,
+  );
 }
 
 // Estados posibles de un pedido dentro del flujo de venta.
@@ -332,13 +476,13 @@ class Order {
   final OrderStatus status;
   final String? id;
 
-  Order copyWith({OrderStatus? status}) => Order(
+  Order copyWith({OrderStatus? status, String? id}) => Order(
     customerEmail: customerEmail,
     productName: productName,
     quantity: quantity,
     createdAt: createdAt,
     status: status ?? this.status,
-    id: id,
+    id: id ?? this.id,
   );
 }
 
@@ -346,14 +490,12 @@ class Order {
 class SurveyResponse {
   const SurveyResponse({
     required this.name,
-    required this.email,
     required this.satisfaction,
     required this.service,
     required this.comments,
   });
 
   final String name;
-  final String email;
   final String satisfaction;
   final String service;
   final String comments;
@@ -367,8 +509,8 @@ final defaultCustomers = <Customer>[
     phone: '0991234567',
     city: 'Cuenca',
     registeredAt: DateTime(2026, 1, 15),
-    email: 'maria@example.com',
-    password: 'cliente123',
+    email: 'maria@gmail.com',
+    password: 'Usuario01',
   ),
   Customer(
     cedula: '0912345678',
@@ -377,10 +519,52 @@ final defaultCustomers = <Customer>[
     phone: '0987654321',
     city: 'Guayaquil',
     registeredAt: DateTime(2026, 2, 8),
-    email: 'carlos@example.com',
-    password: 'cliente123',
+    email: 'carlos@gmail.com',
+    password: 'Usuario01',
+  ),
+  Customer(
+    cedula: '0109876543',
+    name: 'Ana Torres',
+    address: 'Av. Loja y Remigio Crespo',
+    phone: '0998765432',
+    city: 'Cuenca',
+    registeredAt: DateTime(2026, 3, 12),
+    email: 'ana@gmail.com',
+    password: 'Usuario01',
+  ),
+  Customer(
+    cedula: '0923456789',
+    name: 'Diego Cárdenas',
+    address: 'Av. 9 de Octubre 450',
+    phone: '0976543210',
+    city: 'Guayaquil',
+    registeredAt: DateTime(2026, 4, 5),
+    email: 'diego@gmail.com',
+    password: 'Usuario01',
+  ),
+  Customer(
+    cedula: '1712345678',
+    name: 'Sofía Andrade',
+    address: 'Av. República y Amazonas',
+    phone: '0965432109',
+    city: 'Quito',
+    registeredAt: DateTime(2026, 5, 21),
+    email: 'sofia@gmail.com',
+    password: 'Usuario01',
   ),
 ];
+
+String _customerEmailFromName(String name) {
+  final firstName = name.trim().split(RegExp(r'\s+')).first.toLowerCase();
+  final normalizedName = firstName
+      .replaceAll('á', 'a')
+      .replaceAll('é', 'e')
+      .replaceAll('í', 'i')
+      .replaceAll('ó', 'o')
+      .replaceAll('ú', 'u')
+      .replaceAll('ü', 'u');
+  return '$normalizedName@gmail.com';
+}
 
 const products = [
   // Catálogo inicial que se copia al estado de StoreHomeScreen.
@@ -433,6 +617,55 @@ const products = [
     description: 'Confort y temperatura ideal durante todo el año.',
     stock: 4,
   ),
+  Product(
+    name: 'Cocina a gas 6 quemadores',
+    type: 'Cocina',
+    category: 'Cocina',
+    price: 'USD 529.00',
+    icon: Icons.countertops,
+    description: 'Superficie resistente y horno de gran capacidad.',
+    stock: 6,
+  ),
+  Product(
+    name: 'Licuadora TurboMix 1.5 L',
+    type: 'Licuadora',
+    category: 'Cocina',
+    price: 'USD 89.00',
+    icon: Icons.blender,
+    description: 'Motor potente para preparar bebidas y alimentos.',
+    stock: 12,
+    offerEnabled: true,
+    offerPrice: 'USD 74.00',
+  ),
+  Product(
+    name: 'Laptop UltraBook 14 pulgadas',
+    type: 'Laptop',
+    category: 'Tecnología',
+    price: 'USD 1,199.00',
+    icon: Icons.laptop_mac,
+    description: 'Rendimiento ágil para trabajo, estudio y entretenimiento.',
+    stock: 5,
+  ),
+  Product(
+    name: 'Extractor de aire 90 cm',
+    type: 'Extractor',
+    category: 'Cocina',
+    price: 'USD 249.00',
+    icon: Icons.air,
+    description: 'Reduce humo y olores para mantener tu cocina limpia.',
+    stock: 7,
+  ),
+  Product(
+    name: 'Cámara de seguridad WiFi',
+    type: 'Cámara',
+    category: 'Tecnología',
+    price: 'USD 129.00',
+    icon: Icons.videocam_outlined,
+    description: 'Monitoreo remoto con visión nocturna y alerta móvil.',
+    stock: 15,
+    offerEnabled: true,
+    offerPrice: 'USD 109.00',
+  ),
 ];
 
 // Lista inicial que se puede ampliar, renombrar o eliminar desde administración.
@@ -461,6 +694,7 @@ class _StoreHomeScreenState extends State<StoreHomeScreen> {
   List<Order> _orders = [];
   final List<SurveyResponse> _surveys = [];
   Customer? _loggedCustomer;
+  bool _isAdmin = false;
 
   @override
   void initState() {
@@ -472,35 +706,127 @@ class _StoreHomeScreenState extends State<StoreHomeScreen> {
   // cuando la base aún está vacía o Firebase no está disponible.
   Future<void> _loadPersistedData() async {
     if (!FirebaseStoreRepository.isAvailable) return;
-    try {
-      final savedProducts = await FirebaseStoreRepository.loadProducts();
-      final savedCategories = await FirebaseStoreRepository.loadCategories();
-      final savedCustomers = await FirebaseStoreRepository.loadCustomers();
-      final savedOrders = await FirebaseStoreRepository.loadOrders();
-      final savedSurveys = await FirebaseStoreRepository.loadSurveys();
-      if (!mounted) return;
-      setState(() {
-        if (savedProducts.isNotEmpty) _products = savedProducts;
-        if (savedCategories.isNotEmpty) _categories = savedCategories;
-        if (savedCustomers.isNotEmpty) _customers = savedCustomers;
-        _orders = savedOrders;
-        _surveys
-          ..clear()
-          ..addAll(savedSurveys);
-      });
-      if (savedProducts.isEmpty) {
-        await FirebaseStoreRepository.saveProducts(_products);
-      }
-      if (savedCategories.isEmpty) {
-        await FirebaseStoreRepository.saveCategories(_categories);
-      }
-    } catch (error) {
-      debugPrint('No se pudieron cargar datos de Firebase: $error');
+    final results = await Future.wait<Object?>([
+      FirebaseStoreRepository._runRead(
+        'productos',
+        FirebaseStoreRepository.loadProducts,
+      ),
+      FirebaseStoreRepository._runRead(
+        'categorías',
+        FirebaseStoreRepository.loadCategories,
+      ),
+      FirebaseStoreRepository._runRead(
+        'clientes',
+        FirebaseStoreRepository.loadCustomers,
+      ),
+      FirebaseStoreRepository._runRead(
+        'reservas',
+        FirebaseStoreRepository.loadOrders,
+      ),
+      FirebaseStoreRepository._runRead(
+        'encuestas',
+        FirebaseStoreRepository.loadSurveys,
+      ),
+    ]);
+    final savedProducts = results[0] as List<Product>? ?? [];
+    final savedCategories = results[1] as List<String>? ?? [];
+    final savedCustomers = results[2] as List<Customer>? ?? [];
+    final savedOrders = results[3] as List<Order>? ?? [];
+    final savedSurveys = results[4] as List<SurveyResponse>? ?? [];
+    final customersToPersist = (savedCustomers.isEmpty
+            ? _customers
+            : savedCustomers)
+        .map(
+          (customer) => customer.copyWith(
+            email: _customerEmailFromName(customer.name),
+            password: 'Usuario01',
+          ),
+        )
+        .toList();
+    if (!mounted) return;
+    setState(() {
+      if (savedProducts.isNotEmpty) _products = savedProducts;
+      if (savedCategories.isNotEmpty) _categories = savedCategories;
+      _customers = customersToPersist;
+      _orders = savedOrders;
+      _surveys
+        ..clear()
+        ..addAll(savedSurveys);
+    });
+    if (savedProducts.isEmpty) {
+      await FirebaseStoreRepository.saveProducts(_products);
     }
+    if (savedCategories.isEmpty) {
+      await FirebaseStoreRepository.saveCategories(_categories);
+    }
+    await FirebaseStoreRepository.replaceCustomers(customersToPersist);
   }
 
   @override
   Widget build(BuildContext context) {
+    if (_loggedCustomer == null && !_isAdmin) {
+      return LoginScreen(
+        customers: _customers,
+        onCustomerRegistered: (customer) => setState(() {
+          _customers.add(customer);
+          FirebaseStoreRepository.saveCustomer(customer);
+        }),
+        onCustomerLogin: (customer) =>
+            setState(() => _loggedCustomer = customer),
+        onAdminLogin: () {
+          setState(() => _isAdmin = true);
+          _openAdmin(context);
+        },
+      );
+    }
+
+    if (_loggedCustomer != null && !_isAdmin) {
+      return Scaffold(
+        appBar: AppBar(
+          title: const Text('ElectroHome Ecuador'),
+          actions: [
+            IconButton(
+              tooltip: 'Mis reservas',
+              icon: const Icon(Icons.receipt_long_outlined),
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => CustomerReservationsScreen(
+                    customer: _loggedCustomer!,
+                    orders: _orders,
+                  ),
+                ),
+              ),
+            ),
+            IconButton(
+              tooltip: 'Cerrar sesión',
+              icon: const Icon(Icons.logout),
+              onPressed: () => setState(() => _loggedCustomer = null),
+            ),
+          ],
+        ),
+        drawer: StoreDrawer(
+          isAdmin: false,
+          customer: _loggedCustomer,
+          onManageProducts: () {},
+          onManageCustomers: () {},
+          onManageOrders: () {},
+          onCustomerRegistered: (_) {},
+          onSurveySubmitted: (survey) => setState(() {
+            _surveys.add(survey);
+            FirebaseStoreRepository.saveSurvey(survey);
+          }),
+        ),
+        body: ProductList(
+          products: _products.where((product) => product.stock > 0).toList(),
+          showOffer: true,
+          filterOffers: false,
+          customer: _loggedCustomer,
+          onOrder: _createOrder,
+        ),
+      );
+    }
+
     // DefaultTabController permite cambiar entre Inicio, Categorías y Ofertas.
     return DefaultTabController(
       length: 3,
@@ -509,9 +835,12 @@ class _StoreHomeScreenState extends State<StoreHomeScreen> {
           title: const Text('ElectroHome Ecuador'),
           actions: [
             IconButton(
-              tooltip: 'Iniciar sesión',
-              icon: const Icon(Icons.person_outline),
-              onPressed: () => _openLogin(context),
+              tooltip: 'Cerrar sesión',
+              icon: const Icon(Icons.logout),
+              onPressed: () => setState(() {
+                _loggedCustomer = null;
+                _isAdmin = false;
+              }),
             ),
           ],
           bottom: const TabBar(
@@ -523,8 +852,11 @@ class _StoreHomeScreenState extends State<StoreHomeScreen> {
           ),
         ),
         drawer: StoreDrawer(
+          isAdmin: true,
+          customer: null,
           onManageProducts: () => _openProductManager(context),
           onManageCustomers: () => _openCustomerManager(context),
+          onManageOrders: () => _openAdmin(context),
           onCustomerRegistered: (customer) => setState(() {
             _customers.add(customer);
             FirebaseStoreRepository.saveCustomer(customer);
@@ -539,31 +871,16 @@ class _StoreHomeScreenState extends State<StoreHomeScreen> {
             ProductList(
               products: _products,
               customer: _loggedCustomer,
-              onOrder: _createOrder,
+              onOrder: _isAdmin ? null : _createOrder,
             ),
             CategoryList(categories: _categories),
             ProductList(
               products: _products,
               showOffer: true,
               customer: _loggedCustomer,
-              onOrder: _createOrder,
+              onOrder: _isAdmin ? null : _createOrder,
             ),
           ],
-        ),
-      ),
-    );
-  }
-
-  // Abre el login y recibe el cliente autenticado o la entrada del administrador.
-  void _openLogin(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => LoginScreen(
-          customers: _customers,
-          onCustomerLogin: (customer) =>
-              setState(() => _loggedCustomer = customer),
-          onAdminLogin: () => _openAdmin(context),
         ),
       ),
     );
@@ -572,14 +889,23 @@ class _StoreHomeScreenState extends State<StoreHomeScreen> {
   // Verifica el stock, descuenta las unidades y crea el pedido persistente.
   void _createOrder(Product product, int quantity) {
     final customer = _loggedCustomer;
-    if (customer == null) {
-      _openLogin(context);
+    if (customer == null) return;
+    final productIndex = _products.indexWhere(
+      (item) => item.name == product.name,
+    );
+    if (productIndex < 0 ||
+        quantity <= 0 ||
+        quantity > _products[productIndex].stock) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('La cantidad supera el stock disponible')),
+      );
       return;
     }
+
     setState(() {
       _products = _products
           .map(
-            (item) => item == product
+            (item) => item.name == product.name
                 ? item.copyWith(stock: item.stock - quantity)
                 : item,
           )
@@ -593,10 +919,15 @@ class _StoreHomeScreenState extends State<StoreHomeScreen> {
         ),
       );
     });
-    FirebaseStoreRepository.saveProducts(_products);
-    FirebaseStoreRepository.saveOrder(_orders.last);
+    final orderIndex = _orders.length - 1;
+    FirebaseStoreRepository.saveReservation(product, _orders.last).then((id) {
+      if (id == null || !mounted || orderIndex >= _orders.length) return;
+      setState(() {
+        _orders[orderIndex] = _orders[orderIndex].copyWith(id: id);
+      });
+    });
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Pedido solicitado: ${product.name}')),
+      SnackBar(content: Text('Reserva solicitada: ${product.name}')),
     );
   }
 
@@ -668,6 +999,7 @@ class ProductList extends StatelessWidget {
   const ProductList({
     required this.products,
     this.showOffer = false,
+    this.filterOffers = true,
     this.customer,
     this.onOrder,
     super.key,
@@ -675,13 +1007,14 @@ class ProductList extends StatelessWidget {
 
   final List<Product> products;
   final bool showOffer;
+  final bool filterOffers;
   final Customer? customer;
   final void Function(Product product, int quantity)? onOrder;
 
   @override
   Widget build(BuildContext context) {
     // Se filtran los productos para que Ofertas no muestre artículos normales.
-    final visibleProducts = showOffer
+    final visibleProducts = showOffer && filterOffers
         ? products.where((product) => product.offerEnabled).toList()
         : products;
 
@@ -720,7 +1053,7 @@ class ProductList extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.center,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    if (showOffer)
+                    if (showOffer && product.offerEnabled)
                       // La etiqueta muestra el precio promocional cuando existe.
                       Text(
                         product.offerPrice.isEmpty
@@ -732,7 +1065,11 @@ class ProductList extends StatelessWidget {
                         ),
                       ),
                     Text(
-                      product.price,
+                      showOffer &&
+                              product.offerEnabled &&
+                              product.offerPrice.isNotEmpty
+                          ? product.offerPrice
+                          : product.price,
                       style: const TextStyle(fontWeight: FontWeight.bold),
                     ),
                     Text('Stock: ${product.stock}'),
@@ -740,7 +1077,7 @@ class ProductList extends StatelessWidget {
                 ),
                 if (product.stock > 0 && onOrder != null)
                   IconButton(
-                    tooltip: 'Solicitar producto',
+                    tooltip: 'Reservar artículo',
                     onPressed: () => _askQuantity(context, product),
                     icon: const Icon(Icons.add_shopping_cart_outlined),
                   ),
@@ -754,14 +1091,15 @@ class ProductList extends StatelessWidget {
 
   // Pide una cantidad válida antes de enviar la solicitud de compra.
   Future<void> _askQuantity(BuildContext context, Product product) async {
-    final controller = TextEditingController(text: '1');
+    var quantityText = '1';
     final quantity = await showDialog<int>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Solicitar ${product.name}'),
-        content: TextField(
-          controller: controller,
+        title: Text('Reservar ${product.name}'),
+        content: TextFormField(
+          initialValue: quantityText,
           keyboardType: TextInputType.number,
+          onChanged: (value) => quantityText = value,
           decoration: InputDecoration(
             labelText: 'Cantidad (máximo ${product.stock})',
           ),
@@ -773,17 +1111,16 @@ class ProductList extends StatelessWidget {
           ),
           FilledButton(
             onPressed: () {
-              final value = int.tryParse(controller.text) ?? 0;
+              final value = int.tryParse(quantityText) ?? 0;
               if (value > 0 && value <= product.stock) {
                 Navigator.pop(context, value);
               }
             },
-            child: const Text('Confirmar'),
+            child: const Text('Reservar'),
           ),
         ],
       ),
     );
-    controller.dispose();
     if (quantity != null) onOrder?.call(product, quantity);
   }
 }
@@ -871,15 +1208,21 @@ class ProductImage extends StatelessWidget {
 // Menú lateral para acceder a login, registros y herramientas administrativas.
 class StoreDrawer extends StatelessWidget {
   const StoreDrawer({
+    required this.isAdmin,
+    this.customer,
     required this.onManageProducts,
     required this.onManageCustomers,
+    required this.onManageOrders,
     required this.onCustomerRegistered,
     required this.onSurveySubmitted,
     super.key,
   });
 
+  final bool isAdmin;
+  final Customer? customer;
   final VoidCallback onManageProducts;
   final VoidCallback onManageCustomers;
+  final VoidCallback onManageOrders;
   final ValueChanged<Customer> onCustomerRegistered;
   final ValueChanged<SurveyResponse> onSurveySubmitted;
 
@@ -922,42 +1265,41 @@ class StoreDrawer extends StatelessWidget {
               ],
             ),
           ),
-          ListTile(
-            leading: const Icon(Icons.login),
-            title: const Text('Inicio de sesión'),
-            onTap: () {
-              Navigator.pop(context);
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const LoginScreen()),
-              );
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.person_add_alt_1),
-            title: const Text('Registrar nuevo cliente'),
-            onTap: () {
-              Navigator.pop(context);
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => CustomerRegistrationScreen(
-                    onRegistered: onCustomerRegistered,
+          if (isAdmin) ...[
+            ListTile(
+              leading: const Icon(Icons.dashboard_outlined),
+              title: const Text('Panel de gestión'),
+              onTap: () {
+                Navigator.pop(context);
+                onManageOrders();
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.person_add_alt_1),
+              title: const Text('Registrar nuevo cliente'),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => CustomerRegistrationScreen(
+                      onRegistered: onCustomerRegistered,
+                    ),
                   ),
-                ),
-              );
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.manage_accounts_outlined),
-            title: const Text('Gestionar clientes'),
-            onTap: onManageCustomers,
-          ),
-          ListTile(
-            leading: const Icon(Icons.inventory_2_outlined),
-            title: const Text('Administrar productos'),
-            onTap: onManageProducts,
-          ),
+                );
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.manage_accounts_outlined),
+              title: const Text('Gestionar clientes'),
+              onTap: onManageCustomers,
+            ),
+            ListTile(
+              leading: const Icon(Icons.inventory_2_outlined),
+              title: const Text('Administrar productos'),
+              onTap: onManageProducts,
+            ),
+          ],
           const Divider(),
           ListTile(
             leading: const Icon(Icons.rate_review_outlined),
@@ -967,7 +1309,10 @@ class StoreDrawer extends StatelessWidget {
               Navigator.push(
                 context,
                 MaterialPageRoute(
-                  builder: (_) => SurveyScreen(onSubmitted: onSurveySubmitted),
+                    builder: (_) => SurveyScreen(
+                      customer: customer,
+                      onSubmitted: onSurveySubmitted,
+                    ),
                 ),
               );
             },
@@ -1119,7 +1464,11 @@ class _ProductManagerScreenState extends State<ProductManagerScreen> {
             child: ListTile(
               leading: ProductImage(product: product, radius: 20),
               title: Text(product.name),
-              subtitle: Text('${product.type} · ${product.category}'),
+              subtitle: Text(
+                '${product.type} · ${product.category}\n'
+                'Stock disponible: ${product.stock}',
+              ),
+              isThreeLine: true,
               trailing: IconButton(
                 tooltip: 'Editar ${product.name}',
                 icon: const Icon(Icons.edit_outlined),
@@ -1606,9 +1955,12 @@ class _ProductEditorScreenState extends State<ProductEditorScreen> {
                 prefixIcon: Icon(Icons.inventory_2_outlined),
                 border: OutlineInputBorder(),
               ),
-              validator: (value) => int.tryParse(value ?? '') == null
-                  ? 'Ingresa una cantidad válida'
-                  : null,
+              validator: (value) {
+                final stock = int.tryParse(value ?? '');
+                if (stock == null) return 'Ingresa una cantidad válida';
+                if (stock < 0) return 'El stock no puede ser negativo';
+                return null;
+              },
             ),
             const SizedBox(height: 16),
             TextFormField(
@@ -1690,73 +2042,98 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
       length: 2,
       child: Scaffold(
         appBar: AppBar(
-          title: const Text('Panel Administrador'),
-          bottom: const TabBar(
+          title: const Text('Panel de gestión'),
+          bottom: TabBar(
             tabs: [
-              Tab(text: 'Pedidos'),
-              Tab(text: 'Encuestas'),
+              Tab(text: 'Reservas (${widget.orders.length})'),
+              const Tab(text: 'Encuestas'),
             ],
           ),
         ),
         body: TabBarView(
           children: [
-            _orders.isEmpty
-                ? const Center(child: Text('No hay pedidos recibidos'))
-                : ListView.builder(
-                    padding: const EdgeInsets.all(16),
-                    itemCount: _orders.length,
-                    itemBuilder: (context, index) {
-                      final order = _orders[index];
-                      return Card(
-                        child: ListTile(
-                          title: Text(order.productName),
-                          subtitle: Text(
-                            '${order.customerEmail} · Cantidad: ${order.quantity}',
-                          ),
-                          trailing: DropdownButton<OrderStatus>(
-                            value: order.status,
-                            onChanged: (value) {
-                              if (value != null) _changeStatus(index, value);
-                            },
-                            items: const [
-                              DropdownMenuItem(
-                                value: OrderStatus.solicitado,
-                                child: Text('Solicitado'),
+            Column(
+              children: [
+                ListTile(
+                  title: const Text('Total de reservas'),
+                  trailing: Text('${_orders.length}'),
+                ),
+                Expanded(
+                  child: _orders.isEmpty
+                      ? const Center(child: Text('No hay reservas recibidas'))
+                      : ListView.builder(
+                          padding: const EdgeInsets.all(16),
+                          itemCount: _orders.length,
+                          itemBuilder: (context, index) {
+                            final order = _orders[index];
+                            return Card(
+                              child: ListTile(
+                                title: Text('Producto: ${order.productName}'),
+                                subtitle: Text(
+                                  'Cliente: ${order.customerEmail}\n'
+                                  'Cantidad: ${order.quantity}\n'
+                                  'Estado: ${_orderStatusLabel(order.status)}',
+                                ),
+                                isThreeLine: true,
+                                trailing: DropdownButton<OrderStatus>(
+                                  value: order.status,
+                                  onChanged: (value) {
+                                    if (value != null) {
+                                      _changeStatus(index, value);
+                                    }
+                                  },
+                                  items: const [
+                                    DropdownMenuItem(
+                                      value: OrderStatus.solicitado,
+                                      child: Text('Solicitado'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: OrderStatus.despachado,
+                                      child: Text('Despachado'),
+                                    ),
+                                    DropdownMenuItem(
+                                      value: OrderStatus.ventaRealizada,
+                                      child: Text('Venta realizada'),
+                                    ),
+                                  ],
+                                ),
                               ),
-                              DropdownMenuItem(
-                                value: OrderStatus.despachado,
-                                child: Text('Despachado'),
-                              ),
-                              DropdownMenuItem(
-                                value: OrderStatus.ventaRealizada,
-                                child: Text('Venta realizada'),
-                              ),
-                            ],
-                          ),
+                            );
+                          },
                         ),
-                      );
-                    },
-                  ),
-            widget.surveys.isEmpty
-                ? const Center(child: Text('No hay encuestas recibidas'))
-                : ListView.builder(
-                    padding: const EdgeInsets.all(16),
-                    itemCount: widget.surveys.length,
-                    itemBuilder: (context, index) {
-                      final survey = widget.surveys[index];
-                      return Card(
-                        child: ListTile(
-                          title: Text(
-                            '${survey.name} · ${survey.satisfaction}',
-                          ),
-                          subtitle: Text(
-                            '${survey.email}\n${survey.service}: ${survey.comments}',
-                          ),
-                          isThreeLine: true,
+                ),
+              ],
+            ),
+            Column(
+              children: [
+                ListTile(
+                  title: const Text('Total de respuestas'),
+                  trailing: Text('${widget.surveys.length}'),
+                ),
+                Expanded(
+                  child: widget.surveys.isEmpty
+                      ? const Center(child: Text('No hay encuestas recibidas'))
+                      : ListView.builder(
+                          padding: const EdgeInsets.all(16),
+                          itemCount: widget.surveys.length,
+                          itemBuilder: (context, index) {
+                            final survey = widget.surveys[index];
+                            return Card(
+                              child: ListTile(
+                                title: Text(
+                                  '${survey.name} · ${survey.satisfaction}',
+                                ),
+                                subtitle: Text(
+                                  '${survey.service}: ${survey.comments}',
+                                ),
+                                isThreeLine: true,
+                              ),
+                            );
+                          },
                         ),
-                      );
-                    },
-                  ),
+                ),
+              ],
+            ),
           ],
         ),
       ),
@@ -1769,12 +2146,14 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
 class LoginScreen extends StatefulWidget {
   const LoginScreen({
     this.customers = const [],
+    this.onCustomerRegistered,
     this.onCustomerLogin,
     this.onAdminLogin,
     super.key,
   });
 
   final List<Customer> customers;
+  final ValueChanged<Customer>? onCustomerRegistered;
   final ValueChanged<Customer>? onCustomerLogin;
   final VoidCallback? onAdminLogin;
 
@@ -1802,30 +2181,47 @@ class _LoginScreenState extends State<LoginScreen> {
     // cargada desde Firestore o creada durante la sesión.
     // validate ejecuta los validators definidos en los campos.
     if (!(_formKey.currentState?.validate() ?? false)) return;
-    final user = _emailController.text.trim();
+    final user = _emailController.text.trim().toLowerCase();
     final password = _passwordController.text;
-    if ((user == 'ElecAdmin' || user == 'Administrador ElecAdmin') &&
-        password == 'Usuari0100*') {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Sesión de administrador iniciada')),
-      );
+    if ((user == 'elecadmin' || user == 'administrador elecadmin') &&
+        password.trim() == 'Usuari0100*') {
       _emailController.clear();
       _passwordController.clear();
       widget.onAdminLogin?.call();
       return;
     }
     final customer = widget.customers
-        .where((item) => item.email == user && item.password == password)
+        .where(
+          (item) =>
+              (item.email.trim().toLowerCase() == user ||
+                  item.cedula.trim() == user) &&
+              item.password == password,
+        )
         .firstOrNull;
     if (customer == null) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Correo o contraseña incorrectos')),
+        const SnackBar(
+          content: Text('Usuario, correo o contraseña incorrectos'),
+        ),
       );
       return;
     }
     widget.onCustomerLogin?.call(customer);
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Sesión iniciada correctamente')),
+    );
+  }
+
+  Future<void> _registerNewCustomer() async {
+    final customer = await Navigator.push<Customer>(
+      context,
+      MaterialPageRoute(builder: (_) => const CustomerRegistrationScreen()),
+    );
+    if (customer == null || !mounted) return;
+    widget.onCustomerRegistered?.call(customer);
+    widget.onCustomerLogin?.call(customer);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Cuenta registrada e ingreso iniciado')),
     );
   }
 
@@ -1853,24 +2249,25 @@ class _LoginScreenState extends State<LoginScreen> {
             const SizedBox(height: 32),
             TextFormField(
               controller: _emailController,
-              keyboardType: TextInputType.emailAddress,
+              keyboardType: TextInputType.text,
+              autocorrect: false,
+              enableSuggestions: false,
               decoration: const InputDecoration(
-                labelText: 'Correo electrónico',
-                prefixIcon: Icon(Icons.email_outlined),
+                labelText: 'Usuario o correo electrónico',
+                hintText: 'Ingresa tu usuario o correo',
+                prefixIcon: Icon(Icons.person_outline),
                 border: OutlineInputBorder(),
               ),
-              validator: (value) =>
-                  value == null ||
-                      (value != 'ElecAdmin' &&
-                          value != 'Administrador ElecAdmin' &&
-                          !value.contains('@'))
-                  ? 'Ingresa un correo válido'
+              validator: (value) => value == null || value.trim().isEmpty
+                  ? 'Ingresa tu usuario o correo'
                   : null,
             ),
             const SizedBox(height: 16),
             TextFormField(
               controller: _passwordController,
               obscureText: true,
+              autocorrect: false,
+              enableSuggestions: false,
               decoration: const InputDecoration(
                 labelText: 'Contraseña',
                 prefixIcon: Icon(Icons.lock_outline),
@@ -1888,12 +2285,7 @@ class _LoginScreenState extends State<LoginScreen> {
             ),
             const SizedBox(height: 12),
             TextButton(
-              onPressed: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (_) => const CustomerRegistrationScreen(),
-                ),
-              ),
+              onPressed: _registerNewCustomer,
               child: const Text('¿Nuevo cliente? Regístrate aquí'),
             ),
           ],
@@ -1966,6 +2358,7 @@ class _CustomerRegistrationScreenState
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(content: Text('Cliente registrado correctamente')),
     );
+    Navigator.pop(context, customer);
   }
 
   @override
@@ -2220,7 +2613,7 @@ class _CustomerManagerScreenState extends State<CustomerManagerScreen> {
                           ),
                           title: Text(customer.name),
                           subtitle: Text(
-                            'Cédula: ${customer.cedula}\n'
+                            'Cédula: ${customer.cedula} · ${customer.email}\n'
                             '${customer.city} · Registrado: '
                             '${_formatDate(customer.registeredAt)}',
                           ),
@@ -2351,6 +2744,18 @@ class _CustomerEditorScreenState extends State<CustomerEditorScreen> {
               keyboardType: TextInputType.phone,
             ),
             _field(_cityController, 'Ciudad', Icons.location_city_outlined),
+            _field(
+              _emailController,
+              'Correo electrónico',
+              Icons.email_outlined,
+              keyboardType: TextInputType.emailAddress,
+            ),
+            _field(
+              _passwordController,
+              'Contraseña',
+              Icons.lock_outline,
+              obscureText: true,
+            ),
             const SizedBox(height: 8),
             FilledButton.icon(
               onPressed: _save,
@@ -2387,6 +2792,50 @@ class _CustomerEditorScreenState extends State<CustomerEditorScreen> {
   }
 }
 
+// Pantalla privada donde el cliente consulta únicamente sus reservas.
+class CustomerReservationsScreen extends StatelessWidget {
+  const CustomerReservationsScreen({
+    required this.customer,
+    required this.orders,
+    super.key,
+  });
+
+  final Customer customer;
+  final List<Order> orders;
+
+  @override
+  Widget build(BuildContext context) {
+    final customerOrders = orders
+        .where((order) => order.customerEmail == customer.email)
+        .toList();
+    return Scaffold(
+      appBar: AppBar(title: const Text('Mis reservas')),
+      body: customerOrders.isEmpty
+          ? const Center(child: Text('Todavía no tienes reservas'))
+          : ListView.separated(
+              padding: const EdgeInsets.all(16),
+              itemCount: customerOrders.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 8),
+              itemBuilder: (context, index) {
+                final order = customerOrders[index];
+                return Card(
+                  child: ListTile(
+                    leading: const Icon(Icons.shopping_bag_outlined),
+                    title: Text(order.productName),
+                    subtitle: Text(
+                      'Cantidad: ${order.quantity}\n'
+                      'Estado: ${_orderStatusLabel(order.status)}\n'
+                      'Fecha: ${_formatDate(order.createdAt)}',
+                    ),
+                    isThreeLine: true,
+                  ),
+                );
+              },
+            ),
+    );
+  }
+}
+
 // Compara fechas ignorando la hora para el filtro de registros.
 bool _sameDate(DateTime first, DateTime second) =>
     first.year == second.year &&
@@ -2397,6 +2846,17 @@ bool _sameDate(DateTime first, DateTime second) =>
 String _formatDate(DateTime date) =>
     '${date.day.toString().padLeft(2, '0')}/'
     '${date.month.toString().padLeft(2, '0')}/${date.year}';
+
+String _orderStatusLabel(OrderStatus status) {
+  switch (status) {
+    case OrderStatus.solicitado:
+      return 'Solicitado';
+    case OrderStatus.despachado:
+      return 'Despachado';
+    case OrderStatus.ventaRealizada:
+      return 'Venta realizada';
+  }
+}
 
 // Elemento visual de la cabecera de la encuesta.
 class PinkStarLogo extends StatelessWidget {
@@ -2432,8 +2892,9 @@ class PinkStarLogo extends StatelessWidget {
 // Aquí se recopila la opinión del cliente sobre el servicio recibido.
 // Formulario para recopilar y guardar opiniones de los clientes.
 class SurveyScreen extends StatefulWidget {
-  const SurveyScreen({this.onSubmitted, super.key});
+  const SurveyScreen({this.customer, this.onSubmitted, super.key});
 
+  final Customer? customer;
   final ValueChanged<SurveyResponse>? onSubmitted;
 
   @override
@@ -2445,8 +2906,6 @@ class _SurveyScreenState extends State<SurveyScreen> {
   // La llave valida los campos de texto y las selecciones del formulario.
   final _formKey = GlobalKey<FormState>();
   final TextEditingController _nameController = TextEditingController();
-  final TextEditingController _emailController = TextEditingController();
-  final TextEditingController _passwordController = TextEditingController();
   final TextEditingController _commentsController = TextEditingController();
 
   String? _satisfaction;
@@ -2454,10 +2913,8 @@ class _SurveyScreenState extends State<SurveyScreen> {
 
   @override
   void dispose() {
-    // Se liberan los controllers de nombre, correo, contraseña y comentarios.
+    // Se liberan los controllers de nombre y comentarios.
     _nameController.dispose();
-    _emailController.dispose();
-    _passwordController.dispose();
     _commentsController.dispose();
     super.dispose();
   }
@@ -2479,20 +2936,20 @@ class _SurveyScreenState extends State<SurveyScreen> {
       return;
     }
 
-    final nombre = _nameController.text.trim();
+    final nombre = widget.customer?.name ??
+      (_nameController.text.trim().isEmpty
+        ? 'Anónimo'
+        : _nameController.text.trim());
     widget.onSubmitted?.call(
       SurveyResponse(
         name: nombre,
-        email: _emailController.text.trim(),
         satisfaction: _satisfaction!,
         service: _service!,
         comments: _commentsController.text.trim(),
       ),
     );
-    // Cuando todo está completo se confirma el envío al usuario.
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Gracias $nombre, tu encuesta fue enviada.')),
-    );
+    // Cuando se completa, se guarda y se regresa al menú o pantalla anterior.
+    Navigator.pop(context, true);
   }
 
   @override
@@ -2522,65 +2979,21 @@ class _SurveyScreenState extends State<SurveyScreen> {
                 ),
                 const SizedBox(height: 24),
 
-                TextFormField(
-                  controller: _nameController,
-                  decoration: const InputDecoration(
-                    labelText: 'Nombre completo',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.person),
+                if (widget.customer == null)
+                  TextFormField(
+                    controller: _nameController,
+                    decoration: const InputDecoration(
+                      labelText: 'Nombre o Anónimo (opcional)',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.person),
+                    ),
+                  )
+                else
+                  ListTile(
+                    leading: const Icon(Icons.person),
+                    title: const Text('Nombre del cliente'),
+                    subtitle: Text(widget.customer!.name),
                   ),
-                  validator: (value) {
-                    if (value == null || value.trim().isEmpty) {
-                      return 'El nombre es obligatorio';
-                    }
-                    if (value.trim().length < 2) {
-                      return 'Debe ingresar un nombre válido';
-                    }
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 20),
-
-                TextFormField(
-                  controller: _emailController,
-                  keyboardType: TextInputType.emailAddress,
-                  decoration: const InputDecoration(
-                    labelText: 'Correo electrónico',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.email),
-                  ),
-                  validator: (value) {
-                    if (value == null || value.trim().isEmpty) {
-                      return 'El correo electrónico es obligatorio';
-                    }
-                    if (!RegExp(
-                      r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$',
-                    ).hasMatch(value)) {
-                      return 'Ingrese un correo válido (ej: usuario@direccion.com)';
-                    }
-                    return null;
-                  },
-                ),
-                const SizedBox(height: 20),
-
-                TextFormField(
-                  controller: _passwordController,
-                  obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Contraseña',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.lock),
-                  ),
-                  validator: (value) {
-                    if (value == null || value.isEmpty) {
-                      return 'La contraseña es obligatoria';
-                    }
-                    if (value.length <= 6) {
-                      return 'La contraseña debe ser mayor a 6 caracteres';
-                    }
-                    return null;
-                  },
-                ),
                 const SizedBox(height: 20),
 
                 const Text(
